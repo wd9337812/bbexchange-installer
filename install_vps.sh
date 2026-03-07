@@ -7,7 +7,7 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/brandbidding}"
-IMAGE_REGISTRY="${IMAGE_REGISTRY:-docker.io/wd933781}"
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/wd9337812}"
 API_IMAGE="${API_IMAGE:-bbexchange-api}"
 WORKER_IMAGE="${WORKER_IMAGE:-bbexchange-worker}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
@@ -159,7 +159,7 @@ services:
       - pg_data:/var/lib/postgresql/data
 
   api:
-    image: ${IMAGE_REGISTRY:-docker.io/wd933781}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
+    image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
     container_name: bbexchange-api
     restart: unless-stopped
     environment:
@@ -186,7 +186,7 @@ services:
       - postgres
 
   worker:
-    image: ${IMAGE_REGISTRY:-docker.io/wd933781}/${WORKER_IMAGE:-bbexchange-worker}:${IMAGE_TAG:-latest}
+    image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${WORKER_IMAGE:-bbexchange-worker}:${IMAGE_TAG:-latest}
     container_name: bbexchange-worker
     restart: unless-stopped
     environment:
@@ -456,6 +456,7 @@ if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
 else
   echo "URL: http://<YOUR_VPS_PUBLIC_IP>"
 fi
+
 
 
 
