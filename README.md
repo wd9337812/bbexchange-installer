@@ -1,4 +1,4 @@
-﻿# bbexchange-installer
+# bbexchange-installer
 
 Public one-command installer for BBexchange image deployment.
 
@@ -15,4 +15,10 @@ sudo bash /tmp/install_vps.sh
 sudo bash /tmp/install_vps.sh --registry-user <user> --registry-token <token>
 ```
 
-Default image namespace: `docker.io/wd933781`.
+## Optional deployment options
+
+```bash
+sudo bash /tmp/install_vps.sh --image-tag latest --ssl auto --domain example.com
+```
+
+Default image namespace: `ghcr.io/wd9337812`.

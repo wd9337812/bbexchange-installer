@@ -170,10 +170,10 @@ services:
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
       - AUTH_SECRET=${AUTH_SECRET}
       - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
-      - ENABLE_GOOGLE_ADS_MUTATION=${ENABLE_GOOGLE_ADS_MUTATION:-false}
-      - SELF_UPDATE_ENABLED=${SELF_UPDATE_ENABLED:-true}
-      - SELF_UPDATE_MODE=${SELF_UPDATE_MODE:-image}
+      - SELF_UPDATE_ENABLED=${SELF_UPDATE_ENABLED:-false}
+      - SELF_UPDATE_MODE=${SELF_UPDATE_MODE:-manual_image_ops}
       - SELF_UPDATE_REPO_DIR=${SELF_UPDATE_REPO_DIR:-/workspace}
+      - SELF_UPDATE_HOST_REPO_DIR=${SELF_UPDATE_HOST_REPO_DIR:-/opt/brandbidding}
       - SELF_UPDATE_IMAGE_COMPOSE_FILE=${SELF_UPDATE_IMAGE_COMPOSE_FILE:-deploy/docker-compose.image.yml}
       - SELF_UPDATE_IMAGE_CHANNEL_TAG=${SELF_UPDATE_IMAGE_CHANNEL_TAG:-latest}
       - SELF_UPDATE_HELPER_IMAGE=${SELF_UPDATE_HELPER_IMAGE:-docker:27-cli}
@@ -199,7 +199,6 @@ services:
       - CHROMIUM_EXECUTABLE_PATH=${CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium-browser}
       - AUTH_SECRET=${AUTH_SECRET}
       - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
-      - ENABLE_GOOGLE_ADS_MUTATION=${ENABLE_GOOGLE_ADS_MUTATION:-false}
     volumes:
       - ../apps/backend/data:/app/apps/backend/data
     depends_on:
@@ -235,6 +234,9 @@ COMPOSE_FILE="${1:-deploy/docker-compose.image.yml}"
 ENV_FILE="${2:-.env.prod}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-apps/backend/sql/migrations}"
 BASELINE_SCHEMA="${BASELINE_SCHEMA:-apps/backend/sql/phase1_schema.sql}"
+SOURCE_IMAGE="${SOURCE_IMAGE:-}"
+SOURCE_BASELINE_SCHEMA="${SOURCE_BASELINE_SCHEMA:-/app/apps/backend/sql/phase1_schema.sql}"
+SOURCE_MIGRATIONS_DIR="${SOURCE_MIGRATIONS_DIR:-/app/apps/backend/sql/migrations}"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "env file not found: $ENV_FILE"
@@ -249,6 +251,39 @@ if [ "${STORAGE_MODE:-postgres}" != "postgres" ]; then
   echo "db_migrate: STORAGE_MODE=${STORAGE_MODE:-} skip"
   exit 0
 fi
+
+run_psql_stdin() {
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null
+}
+
+load_baseline_sql() {
+  if [ -n "$SOURCE_IMAGE" ]; then
+    docker run --rm --entrypoint sh "$SOURCE_IMAGE" -lc "cat '$SOURCE_BASELINE_SCHEMA'"
+    return
+  fi
+  cat "$BASELINE_SCHEMA"
+}
+
+list_migration_files() {
+  if [ -n "$SOURCE_IMAGE" ]; then
+    docker run --rm --entrypoint sh "$SOURCE_IMAGE" -lc \
+      "for f in '$SOURCE_MIGRATIONS_DIR'/*.sql; do [ -f \"\$f\" ] && basename \"\$f\"; done" | sort
+    return
+  fi
+  if [ -d "$MIGRATIONS_DIR" ]; then
+    find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' -printf '%f\n' | sort
+  fi
+}
+
+load_migration_sql() {
+  file="$1"
+  if [ -n "$SOURCE_IMAGE" ]; then
+    docker run --rm --entrypoint sh "$SOURCE_IMAGE" -lc "cat '$SOURCE_MIGRATIONS_DIR/$file'"
+    return
+  fi
+  cat "$MIGRATIONS_DIR/$file"
+}
 
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres
 
@@ -280,31 +315,26 @@ TASK_EXISTS="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T 
 
 if [ "$TASK_EXISTS" != "1" ]; then
   echo "db_migrate: applying baseline schema..."
-  cat "$BASELINE_SCHEMA" | docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null
+  load_baseline_sql | run_psql_stdin
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
     psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
     -c "insert into schema_migrations(version) values('0000_phase1_schema') on conflict do nothing;" >/dev/null
 fi
 
-if [ -d "$MIGRATIONS_DIR" ]; then
-  for f in $(find "$MIGRATIONS_DIR" -maxdepth 1 -type f -name '*.sql' | sort); do
-    v="$(basename "$f")"
-    applied="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-      psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" -tAc \
-      "select 1 from schema_migrations where version='${v}' limit 1;" | tr -d '[:space:]')"
-    if [ "$applied" = "1" ]; then
-      echo "db_migrate: skip $v"
-      continue
-    fi
-    echo "db_migrate: apply $v"
-    cat "$f" | docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-      psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null
-    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-      psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
-      -c "insert into schema_migrations(version) values('${v}');" >/dev/null
-  done
-fi
+for v in $(list_migration_files); do
+  applied="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" -tAc \
+    "select 1 from schema_migrations where version='${v}' limit 1;" | tr -d '[:space:]')"
+  if [ "$applied" = "1" ]; then
+    echo "db_migrate: skip $v"
+    continue
+  fi
+  echo "db_migrate: apply $v"
+  load_migration_sql "$v" | run_psql_stdin
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
+    -c "insert into schema_migrations(version) values('${v}');" >/dev/null
+done
 
 echo "db_migrate: done"
 EOF
@@ -357,7 +387,109 @@ trim_keep "$BACKUP_ROOT/files" "data_*.tar.gz"
 echo "db_backup: done"
 EOF
 
-chmod +x scripts/db_migrate.sh scripts/db_backup.sh
+cat > scripts/update_image.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_TAG="${1:-}"
+COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.image.yml}"
+ENV_FILE="${ENV_FILE:-.env.prod}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LAST_TAG_FILE="${REPO_DIR}/apps/backend/data/last_good_image_tag.txt"
+
+cd "${REPO_DIR}"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  echo "env file not found: ${ENV_FILE}"
+  exit 1
+fi
+
+if [[ -z "${TARGET_TAG}" ]]; then
+  TARGET_TAG="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_TAG=//p' "${ENV_FILE}" | head -n 1)"
+  TARGET_TAG="${TARGET_TAG:-latest}"
+fi
+
+IMAGE_REGISTRY="$(sed -n 's/^IMAGE_REGISTRY=//p' "${ENV_FILE}" | head -n 1)"
+API_IMAGE_NAME="$(sed -n 's/^API_IMAGE=//p' "${ENV_FILE}" | head -n 1)"
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/wd9337812}"
+API_IMAGE_NAME="${API_IMAGE_NAME:-bbexchange-api}"
+API_IMAGE_REF="${IMAGE_REGISTRY}/${API_IMAGE_NAME}:${TARGET_TAG}"
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker is not installed"
+  exit 1
+fi
+
+mkdir -p apps/backend/data
+CURRENT_TAG="$(sed -n 's/^IMAGE_TAG=//p' "${ENV_FILE}" | head -n 1)"
+if [[ -n "${CURRENT_TAG}" ]]; then
+  echo "${CURRENT_TAG}" > "${LAST_TAG_FILE}"
+fi
+
+echo "[update] backup database/files..."
+bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+
+if grep -q '^IMAGE_TAG=' "${ENV_FILE}"; then
+  sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${TARGET_TAG}/" "${ENV_FILE}"
+else
+  echo "IMAGE_TAG=${TARGET_TAG}" >> "${ENV_FILE}"
+fi
+
+echo "[update] pull images: ${TARGET_TAG}"
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" pull api worker
+
+echo "[update] migrate schema from image: ${API_IMAGE_REF}"
+SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+
+echo "[update] restart services"
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d api worker caddy
+
+echo "[update] health check"
+curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null
+
+echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
+EOF
+
+cat > scripts/rollback_image.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET_TAG="${1:-}"
+COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.image.yml}"
+ENV_FILE="${ENV_FILE:-.env.prod}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LAST_TAG_FILE="${REPO_DIR}/apps/backend/data/last_good_image_tag.txt"
+
+cd "${REPO_DIR}"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  echo "env file not found: ${ENV_FILE}"
+  exit 1
+fi
+
+if [[ -z "${TARGET_TAG}" && -f "${LAST_TAG_FILE}" ]]; then
+  TARGET_TAG="$(cat "${LAST_TAG_FILE}")"
+fi
+
+if [[ -z "${TARGET_TAG}" ]]; then
+  echo "Usage: bash scripts/rollback_image.sh <last_good_tag>"
+  echo "No fallback tag found in ${LAST_TAG_FILE}"
+  exit 1
+fi
+
+if grep -q '^IMAGE_TAG=' "${ENV_FILE}"; then
+  sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${TARGET_TAG}/" "${ENV_FILE}"
+else
+  echo "IMAGE_TAG=${TARGET_TAG}" >> "${ENV_FILE}"
+fi
+
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" pull api worker
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d api worker caddy
+curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null
+echo "[rollback] success: IMAGE_TAG=${TARGET_TAG}"
+EOF
+
+chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/update_image.sh scripts/rollback_image.sh
 
 if [[ ! -f ".env.prod" ]]; then
   cat > .env.prod <<EOF
@@ -366,16 +498,16 @@ POSTGRES_PASSWORD=$(openssl rand -hex 16)
 POSTGRES_DB=bbexchange
 STORAGE_MODE=${STORAGE_MODE}
 ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER}
-ENABLE_GOOGLE_ADS_MUTATION=false
 AUTH_SECRET=$(openssl rand -hex 32)
 CREDENTIAL_SECRET=$(openssl rand -hex 32)
 IMAGE_REGISTRY=${IMAGE_REGISTRY}
 API_IMAGE=${API_IMAGE}
 WORKER_IMAGE=${WORKER_IMAGE}
 IMAGE_TAG=${IMAGE_TAG}
-SELF_UPDATE_ENABLED=true
-SELF_UPDATE_MODE=image
+SELF_UPDATE_ENABLED=false
+SELF_UPDATE_MODE=manual_image_ops
 SELF_UPDATE_REPO_DIR=/workspace
+SELF_UPDATE_HOST_REPO_DIR=${INSTALL_DIR}
 SELF_UPDATE_IMAGE_COMPOSE_FILE=deploy/docker-compose.image.yml
 SELF_UPDATE_IMAGE_CHANNEL_TAG=${UPDATE_CHANNEL_TAG}
 SELF_UPDATE_HELPER_IMAGE=docker:27-cli
@@ -398,9 +530,10 @@ ensure_env_var "WORKER_IMAGE" "${WORKER_IMAGE}"
 ensure_env_var "IMAGE_TAG" "${IMAGE_TAG}"
 ensure_env_var "STORAGE_MODE" "${STORAGE_MODE}"
 ensure_env_var "ENABLE_BROWSER_EXECUTION" "${ENABLE_BROWSER}"
-ensure_env_var "SELF_UPDATE_ENABLED" "true"
-ensure_env_var "SELF_UPDATE_MODE" "image"
+ensure_env_var "SELF_UPDATE_ENABLED" "false"
+ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
 ensure_env_var "SELF_UPDATE_REPO_DIR" "/workspace"
+ensure_env_var "SELF_UPDATE_HOST_REPO_DIR" "${INSTALL_DIR}"
 ensure_env_var "SELF_UPDATE_IMAGE_COMPOSE_FILE" "deploy/docker-compose.image.yml"
 ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_TAG" "${UPDATE_CHANNEL_TAG}"
 ensure_env_var "SELF_UPDATE_HELPER_IMAGE" "docker:27-cli"
