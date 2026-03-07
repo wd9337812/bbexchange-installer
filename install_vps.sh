@@ -7,7 +7,7 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/brandbidding}"
-IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/wd9337812}"
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-docker.io/wd933781}"
 API_IMAGE="${API_IMAGE:-bbexchange-api}"
 WORKER_IMAGE="${WORKER_IMAGE:-bbexchange-worker}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
@@ -17,8 +17,8 @@ DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 ENABLE_BROWSER="${ENABLE_BROWSER:-true}"
 STORAGE_MODE="${STORAGE_MODE:-postgres}"
-GHCR_USER="${GHCR_USER:-}"
-GHCR_TOKEN="${GHCR_TOKEN:-}"
+REGISTRY_USER="${REGISTRY_USER:-}"
+REGISTRY_TOKEN="${REGISTRY_TOKEN:-}"
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -39,8 +39,8 @@ Options:
   --email <email>              Let's Encrypt email
   --enable-browser <true|false> Enable browser execution (default: ${ENABLE_BROWSER})
   --storage <postgres|file>    Storage mode (default: ${STORAGE_MODE})
-  --ghcr-user <username>       Optional GHCR username for private images
-  --ghcr-token <token>         Optional GHCR token for private images
+  --registry-user <username>   Optional registry username
+  --registry-token <token>     Optional registry token/password
   -h, --help                   Show help
 EOF
 }
@@ -58,8 +58,8 @@ while [[ $# -gt 0 ]]; do
     --email) EMAIL="$2"; shift 2 ;;
     --enable-browser) ENABLE_BROWSER="$2"; shift 2 ;;
     --storage) STORAGE_MODE="$2"; shift 2 ;;
-    --ghcr-user) GHCR_USER="$2"; shift 2 ;;
-    --ghcr-token) GHCR_TOKEN="$2"; shift 2 ;;
+    --registry-user) REGISTRY_USER="$2"; shift 2 ;;
+    --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
   esac
@@ -159,7 +159,7 @@ services:
       - pg_data:/var/lib/postgresql/data
 
   api:
-    image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
+    image: ${IMAGE_REGISTRY:-docker.io/wd933781}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
     container_name: bbexchange-api
     restart: unless-stopped
     environment:
@@ -187,7 +187,7 @@ services:
       - postgres
 
   worker:
-    image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${WORKER_IMAGE:-bbexchange-worker}:${IMAGE_TAG:-latest}
+    image: ${IMAGE_REGISTRY:-docker.io/wd933781}/${WORKER_IMAGE:-bbexchange-worker}:${IMAGE_TAG:-latest}
     container_name: bbexchange-worker
     restart: unless-stopped
     environment:
@@ -428,8 +428,9 @@ EOF
 fi
 
 echo "[5/7] Optional registry login..."
-if [[ -n "${GHCR_USER}" && -n "${GHCR_TOKEN}" ]]; then
-  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+if [[ -n "${REGISTRY_USER}" && -n "${REGISTRY_TOKEN}" ]]; then
+  REGISTRY_HOST="$(echo "${IMAGE_REGISTRY}" | cut -d'/' -f1)"
+  echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USER}" --password-stdin
 fi
 
 echo "[6/7] Pulling images and applying DB schema..."
@@ -456,4 +457,6 @@ if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
 else
   echo "URL: http://<YOUR_VPS_PUBLIC_IP>"
 fi
+
+
 

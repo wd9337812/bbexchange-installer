@@ -9,8 +9,10 @@ curl -fsSL -o /tmp/install_vps.sh https://raw.githubusercontent.com/wd9337812/bb
 sudo bash /tmp/install_vps.sh
 ```
 
-## Private GHCR images
+## Optional registry auth (for private images)
 
 ```bash
-sudo bash /tmp/install_vps.sh --ghcr-user <github_user> --ghcr-token <github_pat_with_read_packages>
+sudo bash /tmp/install_vps.sh --registry-user <user> --registry-token <token>
 ```
+
+Default image namespace: `docker.io/wd933781`.
