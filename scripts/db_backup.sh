@@ -20,6 +20,21 @@ TS="$(date +%Y%m%d_%H%M%S)"
 
 if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres >/dev/null
+  READY=false
+  i=0
+  while [ $i -lt 60 ]; do
+    if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+      pg_isready -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null 2>&1; then
+      READY=true
+      break
+    fi
+    i=$((i+1))
+    sleep 2
+  done
+  if [ "$READY" != "true" ]; then
+    echo "db_backup: postgres is not ready"
+    exit 1
+  fi
   echo "db_backup: postgres dump..."
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
     sh -lc "pg_dump -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -Fc" \
