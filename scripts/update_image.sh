@@ -65,9 +65,9 @@ self_update_ops_assets() {
     mkdir -p "${dir}"
     if curl -fsSL "${INSTALLER_RAW_BASE}/${rel}" -o "${tmp}"; then
       mv "${tmp}" "${dst}"
-      echo "[update] synced ${rel}"
+      echo "[update] ${rel} sync ok"
     else
-      echo "[update] WARN: sync failed for ${rel}, keep local file."
+      echo "[update] ${rel} keep local"
     fi
   }
 
