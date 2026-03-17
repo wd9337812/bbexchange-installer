@@ -1,0 +1,99 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: bbexchange-redis
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - redis_data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bbexchange-postgres
+    restart: unless-stopped
+    command: ["postgres", "-c", "timezone=Asia/Shanghai"]
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-bb}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bb_change_me}
+      - POSTGRES_DB=${POSTGRES_DB:-bbexchange}
+      - TZ=${TZ:-Asia/Shanghai}
+      - PGTZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  api:
+    image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
+    container_name: bbexchange-api
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - TZ=${TZ:-Asia/Shanghai}
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      - REDIS_URL=redis://redis:6379
+      - STORAGE_MODE=${STORAGE_MODE:-postgres}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
+      - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
+      - AUTH_SECRET=${AUTH_SECRET}
+      - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
+      - SELF_UPDATE_ENABLED=${SELF_UPDATE_ENABLED:-false}
+      - SELF_UPDATE_MODE=${SELF_UPDATE_MODE:-manual_image_ops}
+      - SELF_UPDATE_REPO_DIR=${SELF_UPDATE_REPO_DIR:-/workspace}
+      - SELF_UPDATE_HOST_REPO_DIR=${SELF_UPDATE_HOST_REPO_DIR:-/opt/brandbidding}
+      - SELF_UPDATE_IMAGE_COMPOSE_FILE=${SELF_UPDATE_IMAGE_COMPOSE_FILE:-deploy/docker-compose.image.yml}
+      - SELF_UPDATE_IMAGE_CHANNEL_TAG=${SELF_UPDATE_IMAGE_CHANNEL_TAG:-latest}
+      - SELF_UPDATE_HELPER_IMAGE=${SELF_UPDATE_HELPER_IMAGE:-docker:27-cli}
+    volumes:
+      - ../apps/backend/data:/app/apps/backend/data
+      - ..:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - redis
+      - postgres
+
+  worker:
+    image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${WORKER_IMAGE:-bbexchange-worker}:${IMAGE_TAG:-latest}
+    container_name: bbexchange-worker
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - TZ=${TZ:-Asia/Shanghai}
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      - REDIS_URL=redis://redis:6379
+      - STORAGE_MODE=${STORAGE_MODE:-postgres}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
+      - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
+      - BROWSER_POOL_SIZE=${BROWSER_POOL_SIZE:-4}
+      - OFFER_NAV_TIMEOUT_MS=${OFFER_NAV_TIMEOUT_MS:-20000}
+      - CHROMIUM_EXECUTABLE_PATH=${CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium-browser}
+      - AUTH_SECRET=${AUTH_SECRET}
+      - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
+    volumes:
+      - ../apps/backend/data:/app/apps/backend/data
+    depends_on:
+      - redis
+      - postgres
+
+  caddy:
+    image: caddy:2
+    container_name: bbexchange-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  redis_data:
+  pg_data:
+  caddy_data:
+  caddy_config:
+
+
+
