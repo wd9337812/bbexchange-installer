@@ -142,3 +142,4 @@ echo "[update] health check"
 curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null
 
 echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
+
