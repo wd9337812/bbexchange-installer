@@ -34,4 +34,4 @@ curl -fsSL -o /tmp/install_control_plane_vps.sh https://raw.githubusercontent.co
 sudo bash /tmp/install_control_plane_vps.sh
 ```
 
-`install_control_plane_vps.sh` clones the app repo branch and runs `scripts/bootstrap_control_plane_vps_image.sh`.
+The script is self-contained in this public repo and does not require cloning the private app repository.

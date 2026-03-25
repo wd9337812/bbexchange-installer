@@ -1,0 +1,71 @@
+services:
+  redis_admin:
+    image: redis:7-alpine
+    container_name: bbexchange-admin-redis
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - redis_admin_data:/data
+
+  postgres_admin:
+    image: postgres:16-alpine
+    container_name: bbexchange-admin-postgres
+    restart: unless-stopped
+    command: ["postgres", "-c", "timezone=Asia/Shanghai"]
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-bb}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bb_change_me}
+      - POSTGRES_DB=${POSTGRES_DB:-bbexchange}
+      - TZ=${TZ:-Asia/Shanghai}
+      - PGTZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - pg_admin_data:/var/lib/postgresql/data
+
+  api_admin:
+    image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
+    container_name: bbexchange-api-admin
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - TZ=${TZ:-Asia/Shanghai}
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      - REDIS_URL=redis://redis_admin:6379
+      - STORAGE_MODE=${STORAGE_MODE:-postgres}
+      - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres_admin:5432/${POSTGRES_DB:-bbexchange}
+      - ENABLE_BROWSER_EXECUTION=false
+      - TENANT_CODE=${TENANT_CODE:-admin-console}
+      - AUTH_SECRET=${AUTH_SECRET}
+      - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
+      - APP_SERVER_MODE=control
+      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+      - ADMIN_DEFAULT_PASSWORD=${ADMIN_DEFAULT_PASSWORD:-e5w70o0874}
+      - SELF_UPDATE_ENABLED=false
+    ports:
+      - "${ADMIN_PORT:-3111}:3000"
+    volumes:
+      - ../apps/backend/data:/app/apps/backend/data
+    depends_on:
+      - redis_admin
+      - postgres_admin
+
+  caddy_admin:
+    image: caddy:2
+    container_name: bbexchange-admin-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile.admin:/etc/caddy/Caddyfile:ro
+      - caddy_admin_data:/data
+      - caddy_admin_config:/config
+    depends_on:
+      - api_admin
+
+volumes:
+  redis_admin_data:
+  pg_admin_data:
+  caddy_admin_data:
+  caddy_admin_config:
