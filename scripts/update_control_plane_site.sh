@@ -12,6 +12,10 @@ COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.admin.image.yml}"
 TARGET_TAG="${1:-}"
 LAST_TAG_FILE_REL="apps/backend/data/last_good_admin_image_tag.txt"
 LAST_TAG_FILE="${INSTALL_DIR}/${LAST_TAG_FILE_REL}"
+REQUIRED_FREE_GB="${REQUIRED_FREE_GB:-4}"
+REQUIRED_FREE_INODE_PERCENT="${REQUIRED_FREE_INODE_PERCENT:-10}"
+AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
+DRY_RUN="${DRY_RUN:-false}"
 
 read_env() {
   local key="$1"
@@ -28,6 +32,94 @@ write_env() {
   else
     echo "${key}=${value}" >> "$file"
   fi
+}
+
+bool_true() {
+  local v="${1:-}"
+  v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
+  [[ "${v}" == "1" || "${v}" == "true" || "${v}" == "yes" || "${v}" == "on" ]]
+}
+
+check_path_capacity() {
+  local path="$1"
+  local required_kb="$2"
+  local required_inode_percent="$3"
+  local label="$4"
+  local avail_kb
+  local inode_total
+  local inode_avail
+  local inode_free_percent
+  avail_kb="$(df -Pk "${path}" | awk 'NR==2 {print $4}')"
+  inode_total="$(df -Pi "${path}" | awk 'NR==2 {print $2}')"
+  inode_avail="$(df -Pi "${path}" | awk 'NR==2 {print $4}')"
+  avail_kb="${avail_kb:-0}"
+  inode_total="${inode_total:-0}"
+  inode_avail="${inode_avail:-0}"
+  if [[ "${inode_total}" -gt 0 ]]; then
+    inode_free_percent=$(( inode_avail * 100 / inode_total ))
+  else
+    inode_free_percent=100
+  fi
+  echo "[preflight] ${label}: free=$((avail_kb / 1024 / 1024))GB inode_free=${inode_free_percent}%"
+  if [[ "${avail_kb}" -lt "${required_kb}" ]]; then
+    echo "[preflight] insufficient disk on ${label}"
+    return 1
+  fi
+  if [[ "${inode_free_percent}" -lt "${required_inode_percent}" ]]; then
+    echo "[preflight] insufficient inode on ${label}"
+    return 1
+  fi
+  return 0
+}
+
+run_preflight_upgrade() {
+  local required_kb
+  local docker_root
+  local risk=0
+  required_kb=$(( REQUIRED_FREE_GB * 1024 * 1024 ))
+  docker_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
+  docker_root="${docker_root:-/var/lib/docker}"
+
+  echo "[preflight] required free disk >= ${REQUIRED_FREE_GB}GB, inode free >= ${REQUIRED_FREE_INODE_PERCENT}%"
+  docker system df || true
+  df -h / "${docker_root}" 2>/dev/null || true
+  df -ih / "${docker_root}" 2>/dev/null || true
+
+  check_path_capacity "/" "${required_kb}" "${REQUIRED_FREE_INODE_PERCENT}" "rootfs(/)" || risk=1
+  check_path_capacity "${docker_root}" "${required_kb}" "${REQUIRED_FREE_INODE_PERCENT}" "docker(${docker_root})" || risk=1
+  if [[ "${risk}" -eq 0 ]]; then
+    echo "[preflight] capacity check passed."
+    return 0
+  fi
+
+  if bool_true "${DRY_RUN}"; then
+    echo "[preflight] DRY_RUN=true and capacity check failed."
+    return 31
+  fi
+
+  if ! bool_true "${AUTO_CLEANUP}"; then
+    echo "[preflight] AUTO_CLEANUP=false and capacity check failed."
+    return 32
+  fi
+
+  echo "[preflight] start safe cleanup (without volume prune)..."
+  docker container prune -f || true
+  docker network prune -f || true
+  docker builder prune -af || true
+  docker image prune -af || true
+  docker system df || true
+  df -h / "${docker_root}" 2>/dev/null || true
+  df -ih / "${docker_root}" 2>/dev/null || true
+
+  risk=0
+  check_path_capacity "/" "${required_kb}" "${REQUIRED_FREE_INODE_PERCENT}" "rootfs(/)" || risk=1
+  check_path_capacity "${docker_root}" "${required_kb}" "${REQUIRED_FREE_INODE_PERCENT}" "docker(${docker_root})" || risk=1
+  if [[ "${risk}" -ne 0 ]]; then
+    echo "[preflight] still insufficient after cleanup."
+    return 32
+  fi
+  echo "[preflight] capacity recovered."
+  return 0
 }
 
 rollback() {
@@ -63,6 +155,12 @@ API_IMAGE_REF="${IMAGE_REGISTRY}/${API_IMAGE}:${TARGET_TAG}"
 mkdir -p "$(dirname "${LAST_TAG_FILE}")"
 if [[ -n "${CURRENT_TAG}" ]]; then
   echo "${CURRENT_TAG}" > "${LAST_TAG_FILE}"
+fi
+
+if ! run_preflight_upgrade; then
+  code=$?
+  echo "[update] preflight failed with code=${code}"
+  exit "${code}"
 fi
 
 echo "[1/6] Backup control-plane data..."
