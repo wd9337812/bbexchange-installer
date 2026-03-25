@@ -144,6 +144,8 @@ services:
     image: redis:7-alpine
     container_name: bbexchange-redis
     restart: unless-stopped
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
     volumes:
       - redis_data:/data
 
@@ -151,10 +153,13 @@ services:
     image: postgres:16-alpine
     container_name: bbexchange-postgres
     restart: unless-stopped
+    command: ["postgres", "-c", "timezone=Asia/Shanghai"]
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-bb}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bb_change_me}
       - POSTGRES_DB=${POSTGRES_DB:-bbexchange}
+      - TZ=${TZ:-Asia/Shanghai}
+      - PGTZ=${TZ:-Asia/Shanghai}
     volumes:
       - pg_data:/var/lib/postgresql/data
 
@@ -163,13 +168,21 @@ services:
     container_name: bbexchange-api
     restart: unless-stopped
     environment:
+      - NODE_ENV=${NODE_ENV:-production}
       - PORT=3000
+      - TZ=${TZ:-Asia/Shanghai}
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
       - REDIS_URL=redis://redis:6379
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
+      - TENANT_CODE=${TENANT_CODE:-local}
       - AUTH_SECRET=${AUTH_SECRET}
       - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
+      - APP_SERVER_MODE=${APP_SERVER_MODE:-user}
+      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
+      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+      - CONTROL_PLANE_TIMEOUT_MS=${CONTROL_PLANE_TIMEOUT_MS:-8000}
       - SELF_UPDATE_ENABLED=${SELF_UPDATE_ENABLED:-false}
       - SELF_UPDATE_MODE=${SELF_UPDATE_MODE:-manual_image_ops}
       - SELF_UPDATE_REPO_DIR=${SELF_UPDATE_REPO_DIR:-/workspace}
@@ -190,10 +203,14 @@ services:
     container_name: bbexchange-worker
     restart: unless-stopped
     environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - TZ=${TZ:-Asia/Shanghai}
+      - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
       - REDIS_URL=redis://redis:6379
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
+      - TENANT_CODE=${TENANT_CODE:-local}
       - BROWSER_POOL_SIZE=${BROWSER_POOL_SIZE:-4}
       - OFFER_NAV_TIMEOUT_MS=${OFFER_NAV_TIMEOUT_MS:-20000}
       - CHROMIUM_EXECUTABLE_PATH=${CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium-browser}
@@ -404,6 +421,20 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 1
 fi
 
+ensure_env_var() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" "${ENV_FILE}"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "${ENV_FILE}"
+  else
+    echo "${key}=${value}" >> "${ENV_FILE}"
+  fi
+}
+
+ensure_env_var "TZ" "Asia/Shanghai"
+ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
+ensure_env_var "NODE_ENV" "production"
+
 if [[ -z "${TARGET_TAG}" ]]; then
   TARGET_TAG="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_TAG=//p' "${ENV_FILE}" | head -n 1)"
   TARGET_TAG="${TARGET_TAG:-latest}"
@@ -411,9 +442,12 @@ fi
 
 IMAGE_REGISTRY="$(sed -n 's/^IMAGE_REGISTRY=//p' "${ENV_FILE}" | head -n 1)"
 API_IMAGE_NAME="$(sed -n 's/^API_IMAGE=//p' "${ENV_FILE}" | head -n 1)"
+WORKER_IMAGE_NAME="$(sed -n 's/^WORKER_IMAGE=//p' "${ENV_FILE}" | head -n 1)"
 IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/wd9337812}"
 API_IMAGE_NAME="${API_IMAGE_NAME:-bbexchange-api}"
+WORKER_IMAGE_NAME="${WORKER_IMAGE_NAME:-bbexchange-worker}"
 API_IMAGE_REF="${IMAGE_REGISTRY}/${API_IMAGE_NAME}:${TARGET_TAG}"
+WORKER_IMAGE_REF="${IMAGE_REGISTRY}/${WORKER_IMAGE_NAME}:${TARGET_TAG}"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "docker is not installed"
@@ -426,6 +460,9 @@ if [[ -n "${CURRENT_TAG}" ]]; then
   echo "${CURRENT_TAG}" > "${LAST_TAG_FILE}"
 fi
 
+before_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
+before_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
+
 echo "[update] backup database/files..."
 bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
@@ -437,6 +474,16 @@ fi
 
 echo "[update] pull images: ${TARGET_TAG}"
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" pull api worker
+
+after_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
+after_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
+
+if [[ "${TARGET_TAG}" == "latest" && -n "${before_api_id}" && -n "${after_api_id}" && "${before_api_id}" == "${after_api_id}" && -n "${before_worker_id}" && -n "${after_worker_id}" && "${before_worker_id}" == "${after_worker_id}" ]]; then
+  echo "[update] no new image pulled for tag 'latest'. Build may still be running or latest has not changed."
+  echo "[update] current api image id: ${after_api_id}"
+  echo "[update] current worker image id: ${after_worker_id}"
+  exit 2
+fi
 
 echo "[update] migrate schema from image: ${API_IMAGE_REF}"
 SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
@@ -492,14 +539,23 @@ EOF
 chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/update_image.sh scripts/rollback_image.sh
 
 if [[ ! -f ".env.prod" ]]; then
+  TENANT_CODE_VALUE="tenant-$(openssl rand -hex 6)"
   cat > .env.prod <<EOF
 POSTGRES_USER=bb
 POSTGRES_PASSWORD=$(openssl rand -hex 16)
 POSTGRES_DB=bbexchange
 STORAGE_MODE=${STORAGE_MODE}
 ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER}
+TZ=Asia/Shanghai
+APP_TIMEZONE=Asia/Shanghai
+NODE_ENV=production
 AUTH_SECRET=$(openssl rand -hex 32)
 CREDENTIAL_SECRET=$(openssl rand -hex 32)
+TENANT_CODE=${TENANT_CODE_VALUE}
+APP_SERVER_MODE=user
+CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
+CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+CONTROL_PLANE_TIMEOUT_MS=8000
 IMAGE_REGISTRY=${IMAGE_REGISTRY}
 API_IMAGE=${API_IMAGE}
 WORKER_IMAGE=${WORKER_IMAGE}
@@ -507,10 +563,11 @@ IMAGE_TAG=${IMAGE_TAG}
 SELF_UPDATE_ENABLED=false
 SELF_UPDATE_MODE=manual_image_ops
 SELF_UPDATE_REPO_DIR=/workspace
-SELF_UPDATE_HOST_REPO_DIR=${INSTALL_DIR}
+SELF_UPDATE_HOST_REPO_DIR=${TARGET_DIR}
 SELF_UPDATE_IMAGE_COMPOSE_FILE=deploy/docker-compose.image.yml
 SELF_UPDATE_IMAGE_CHANNEL_TAG=${UPDATE_CHANNEL_TAG}
 SELF_UPDATE_HELPER_IMAGE=docker:27-cli
+SELF_UPDATE_INSTALLER_RAW_BASE=https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main
 EOF
 fi
 
@@ -524,19 +581,43 @@ ensure_env_var() {
   fi
 }
 
+ensure_secret_var() {
+  local key="$1"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    if grep -q "^${key}=" .env.prod; then
+      sed -i "s/^${key}=.*/${key}=$(openssl rand -hex 32)/" .env.prod
+    else
+      echo "${key}=$(openssl rand -hex 32)" >> .env.prod
+    fi
+  fi
+}
+
 ensure_env_var "IMAGE_REGISTRY" "${IMAGE_REGISTRY}"
 ensure_env_var "API_IMAGE" "${API_IMAGE}"
 ensure_env_var "WORKER_IMAGE" "${WORKER_IMAGE}"
 ensure_env_var "IMAGE_TAG" "${IMAGE_TAG}"
 ensure_env_var "STORAGE_MODE" "${STORAGE_MODE}"
 ensure_env_var "ENABLE_BROWSER_EXECUTION" "${ENABLE_BROWSER}"
+ensure_env_var "TZ" "Asia/Shanghai"
+ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
+ensure_env_var "NODE_ENV" "production"
+ensure_env_var "TENANT_CODE" "tenant-$(openssl rand -hex 6)"
+ensure_env_var "APP_SERVER_MODE" "user"
+ensure_env_var "CONTROL_PLANE_BASE_URL" "${CONTROL_PLANE_BASE_URL:-}"
+ensure_env_var "CONTROL_PLANE_SHARED_KEY" "${CONTROL_PLANE_SHARED_KEY:-}"
+ensure_env_var "CONTROL_PLANE_TIMEOUT_MS" "8000"
 ensure_env_var "SELF_UPDATE_ENABLED" "false"
 ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
 ensure_env_var "SELF_UPDATE_REPO_DIR" "/workspace"
-ensure_env_var "SELF_UPDATE_HOST_REPO_DIR" "${INSTALL_DIR}"
+ensure_env_var "SELF_UPDATE_HOST_REPO_DIR" "${TARGET_DIR}"
 ensure_env_var "SELF_UPDATE_IMAGE_COMPOSE_FILE" "deploy/docker-compose.image.yml"
 ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_TAG" "${UPDATE_CHANNEL_TAG}"
 ensure_env_var "SELF_UPDATE_HELPER_IMAGE" "docker:27-cli"
+ensure_env_var "SELF_UPDATE_INSTALLER_RAW_BASE" "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
+ensure_secret_var "AUTH_SECRET"
+ensure_secret_var "CREDENTIAL_SECRET"
 
 echo "[4/7] Writing Caddy config..."
 if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
