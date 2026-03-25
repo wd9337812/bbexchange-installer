@@ -20,8 +20,20 @@ ADMIN_DOMAIN="${ADMIN_DOMAIN:-}"
 LICENSE_DOMAIN="${LICENSE_DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 ADMIN_DEFAULT_PASSWORD="${ADMIN_DEFAULT_PASSWORD:-}"
+ENV_FILE="${INSTALL_DIR}/.env.admin.prod"
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
+existing_env_value() {
+  local key="$1"
+  local file="$2"
+  if [[ -f "$file" ]]; then
+    sed -n "s/^${key}=//p" "$file" | head -n 1
+  fi
+}
+random_hex() {
+  local len="${1:-32}"
+  openssl rand -hex "$len"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -89,12 +101,24 @@ if [[ "${SSL_MODE}" == "on" ]]; then
 fi
 
 if [[ -z "${ADMIN_DEFAULT_PASSWORD}" ]]; then
+  ADMIN_DEFAULT_PASSWORD="$(existing_env_value "ADMIN_DEFAULT_PASSWORD" "$ENV_FILE")"
+fi
+if [[ -z "${ADMIN_DEFAULT_PASSWORD}" ]]; then
   ADMIN_DEFAULT_PASSWORD="$(openssl rand -base64 18 | tr -dc 'A-Za-z0-9' | head -c 14)"
 fi
 read -rp "Admin initial password [default: ${ADMIN_DEFAULT_PASSWORD}]: " ADMIN_PWD_INPUT
 if [[ -n "${ADMIN_PWD_INPUT}" ]]; then
   ADMIN_DEFAULT_PASSWORD="${ADMIN_PWD_INPUT}"
 fi
+
+POSTGRES_PASSWORD_VALUE="$(existing_env_value "POSTGRES_PASSWORD" "$ENV_FILE")"
+AUTH_SECRET_VALUE="$(existing_env_value "AUTH_SECRET" "$ENV_FILE")"
+CREDENTIAL_SECRET_VALUE="$(existing_env_value "CREDENTIAL_SECRET" "$ENV_FILE")"
+CONTROL_PLANE_SHARED_KEY_VALUE="$(existing_env_value "CONTROL_PLANE_SHARED_KEY" "$ENV_FILE")"
+if [[ -z "${POSTGRES_PASSWORD_VALUE}" ]]; then POSTGRES_PASSWORD_VALUE="$(random_hex 16)"; fi
+if [[ -z "${AUTH_SECRET_VALUE}" ]]; then AUTH_SECRET_VALUE="$(random_hex 32)"; fi
+if [[ -z "${CREDENTIAL_SECRET_VALUE}" ]]; then CREDENTIAL_SECRET_VALUE="$(random_hex 32)"; fi
+if [[ -z "${CONTROL_PLANE_SHARED_KEY_VALUE}" ]]; then CONTROL_PLANE_SHARED_KEY_VALUE="$(random_hex 32)"; fi
 
 echo "[1/7] Installing runtime dependencies..."
 apt-get update -y
@@ -123,21 +147,21 @@ chmod +x "${INSTALL_DIR}/scripts/db_migrate.sh" "${INSTALL_DIR}/scripts/db_backu
 echo "[4/7] Writing env file..."
 cat > "${INSTALL_DIR}/.env.admin.prod" <<EOF
 POSTGRES_USER=bb
-POSTGRES_PASSWORD=$(openssl rand -hex 16)
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD_VALUE}
 POSTGRES_DB=bbexchange
 STORAGE_MODE=postgres
 NODE_ENV=production
 TZ=${TZ_VALUE}
 APP_TIMEZONE=${APP_TIMEZONE_VALUE}
-AUTH_SECRET=$(openssl rand -hex 32)
-CREDENTIAL_SECRET=$(openssl rand -hex 32)
+AUTH_SECRET=${AUTH_SECRET_VALUE}
+CREDENTIAL_SECRET=${CREDENTIAL_SECRET_VALUE}
 TENANT_CODE=admin-console
 IMAGE_REGISTRY=${IMAGE_REGISTRY}
 API_IMAGE=${API_IMAGE}
 IMAGE_TAG=${IMAGE_TAG}
 ADMIN_DEFAULT_PASSWORD=${ADMIN_DEFAULT_PASSWORD}
 APP_SERVER_MODE=control
-CONTROL_PLANE_SHARED_KEY=$(openssl rand -hex 32)
+CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY_VALUE}
 EOF
 
 echo "[5/7] Writing Caddy config..."
