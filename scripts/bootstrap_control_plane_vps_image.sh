@@ -140,9 +140,10 @@ echo "[3/7] Copying deployment assets..."
 cp -f "${REPO_DIR}/deploy/docker-compose.admin.image.yml" "${INSTALL_DIR}/deploy/docker-compose.admin.image.yml"
 cp -f "${REPO_DIR}/scripts/db_migrate.sh" "${INSTALL_DIR}/scripts/db_migrate.sh"
 cp -f "${REPO_DIR}/scripts/db_backup.sh" "${INSTALL_DIR}/scripts/db_backup.sh"
+cp -f "${REPO_DIR}/scripts/update_control_plane_site.sh" "${INSTALL_DIR}/scripts/update_control_plane_site.sh"
 cp -rf "${REPO_DIR}/apps/backend/sql/migrations" "${INSTALL_DIR}/apps/backend/sql/" 2>/dev/null || true
 cp -f "${REPO_DIR}/apps/backend/sql/phase1_schema.sql" "${INSTALL_DIR}/apps/backend/sql/phase1_schema.sql"
-chmod +x "${INSTALL_DIR}/scripts/db_migrate.sh" "${INSTALL_DIR}/scripts/db_backup.sh"
+chmod +x "${INSTALL_DIR}/scripts/db_migrate.sh" "${INSTALL_DIR}/scripts/db_backup.sh" "${INSTALL_DIR}/scripts/update_control_plane_site.sh"
 
 echo "[4/7] Writing env file..."
 cat > "${INSTALL_DIR}/.env.admin.prod" <<EOF

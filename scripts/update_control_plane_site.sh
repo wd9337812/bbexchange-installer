@@ -16,6 +16,7 @@ REQUIRED_FREE_GB="${REQUIRED_FREE_GB:-4}"
 REQUIRED_FREE_INODE_PERCENT="${REQUIRED_FREE_INODE_PERCENT:-10}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
+INSTALLER_RAW_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
 
 read_env() {
   local key="$1"
@@ -122,6 +123,35 @@ run_preflight_upgrade() {
   return 0
 }
 
+self_update_ops_assets() {
+  local base_url="$1"
+  local tmp
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "[update] curl not found, skip ops-assets self-update."
+    return 0
+  fi
+  echo "[update] sync control-plane ops assets from: ${base_url}"
+  mkdir -p deploy scripts
+  tmp="$(mktemp)"
+
+  fetch_one() {
+    local rel="$1"
+    if curl -fsSL "${base_url}/${rel}" -o "${tmp}"; then
+      mv "${tmp}" "${rel}"
+      echo "[update] ${rel} sync ok"
+    else
+      echo "[update] ${rel} keep local"
+    fi
+  }
+
+  fetch_one "deploy/docker-compose.admin.image.yml"
+  fetch_one "scripts/db_migrate.sh"
+  fetch_one "scripts/db_backup.sh"
+  fetch_one "scripts/update_control_plane_site.sh"
+  rm -f "${tmp}" >/dev/null 2>&1 || true
+  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/update_control_plane_site.sh >/dev/null 2>&1 || true
+}
+
 rollback() {
   local old_tag="$1"
   if [[ -z "$old_tag" ]]; then
@@ -139,6 +169,10 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   echo "env file not found: ${INSTALL_DIR}/${ENV_FILE}"
   exit 1
 fi
+
+INSTALLER_RAW_BASE="$(read_env "SELF_UPDATE_INSTALLER_RAW_BASE" "${ENV_FILE}")"
+INSTALLER_RAW_BASE="${INSTALLER_RAW_BASE:-${INSTALLER_RAW_BASE_DEFAULT}}"
+self_update_ops_assets "${INSTALLER_RAW_BASE}"
 
 CURRENT_TAG="$(read_env "IMAGE_TAG" "${ENV_FILE}")"
 CURRENT_TAG="${CURRENT_TAG:-latest}"
