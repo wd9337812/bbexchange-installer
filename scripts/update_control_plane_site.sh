@@ -214,7 +214,7 @@ if ! SOURCE_IMAGE="${API_IMAGE_REF}" sh scripts/db_migrate.sh "${COMPOSE_FILE}" 
 fi
 
 echo "[4/6] Restart api + caddy..."
-if ! docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d api_admin caddy_admin; then
+if ! docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api_admin caddy_admin; then
   rollback "${CURRENT_TAG}"
   exit 1
 fi

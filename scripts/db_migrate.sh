@@ -37,8 +37,9 @@ run_psql_stdin() {
 }
 
 run_super_psql_stdin() {
+  SUPERUSER_ROLE="${POSTGRES_SUPERUSER:-${POSTGRES_USER:-bb}}"
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-    psql -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null
+    psql -v ON_ERROR_STOP=1 -U "${SUPERUSER_ROLE}" -d postgres >/dev/null
 }
 
 run_psql_cmd() {

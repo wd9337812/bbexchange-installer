@@ -238,7 +238,7 @@ echo "[update] migrate schema from image: ${API_IMAGE_REF}"
 SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[update] restart services"
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d api worker caddy
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api worker caddy
 
 echo "[update] health check"
 curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null

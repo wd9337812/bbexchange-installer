@@ -44,8 +44,9 @@ ensure_app_identity() {
   fi
 
   echo "db_backup: app db credential mismatch detected, repairing role/db mapping..."
+  SUPERUSER_ROLE="${POSTGRES_SUPERUSER:-${POSTGRES_USER:-bb}}"
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-    psql -v ON_ERROR_STOP=1 -U postgres -d postgres <<EOF >/dev/null
+    psql -v ON_ERROR_STOP=1 -U "${SUPERUSER_ROLE}" -d postgres <<EOF >/dev/null
 DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${APP_USER_ESC}') THEN
