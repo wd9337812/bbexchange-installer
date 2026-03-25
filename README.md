@@ -15,8 +15,7 @@ In user VPS install directory:
 
 ```bash
 cd /opt/brandbidding
-sudo docker compose --env-file .env.prod -f deploy/docker-compose.image.yml pull
-sudo docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d
+sudo bash scripts/update_image.sh latest
 ```
 
 ## Optional deployment options

@@ -19,6 +19,8 @@ ENABLE_BROWSER="${ENABLE_BROWSER:-true}"
 STORAGE_MODE="${STORAGE_MODE:-postgres}"
 REGISTRY_USER="${REGISTRY_USER:-}"
 REGISTRY_TOKEN="${REGISTRY_TOKEN:-}"
+CONTROL_PLANE_BASE_URL="${CONTROL_PLANE_BASE_URL:-https://license.bbauto.top}"
+CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-92484cd311791604e8c9c96aa310770f5d7b0cefa7aa5a78992f778d6eb9733e}"
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -39,6 +41,8 @@ Options:
   --email <email>              Let's Encrypt email
   --enable-browser <true|false> Enable browser execution (default: ${ENABLE_BROWSER})
   --storage <postgres|file>    Storage mode (default: ${STORAGE_MODE})
+  --control-plane-url <url>    Control-plane base url (default: ${CONTROL_PLANE_BASE_URL})
+  --control-plane-key <key>    Control-plane shared key (default: built-in)
   --registry-user <username>   Optional registry username
   --registry-token <token>     Optional registry token/password
   -h, --help                   Show help
@@ -58,6 +62,8 @@ while [[ $# -gt 0 ]]; do
     --email) EMAIL="$2"; shift 2 ;;
     --enable-browser) ENABLE_BROWSER="$2"; shift 2 ;;
     --storage) STORAGE_MODE="$2"; shift 2 ;;
+    --control-plane-url) CONTROL_PLANE_BASE_URL="$2"; shift 2 ;;
+    --control-plane-key) CONTROL_PLANE_SHARED_KEY="$2"; shift 2 ;;
     --registry-user) REGISTRY_USER="$2"; shift 2 ;;
     --registry-token) REGISTRY_TOKEN="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
@@ -180,8 +186,8 @@ services:
       - AUTH_SECRET=${AUTH_SECRET}
       - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
       - APP_SERVER_MODE=${APP_SERVER_MODE:-user}
-      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
-      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL}
+      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY}
       - CONTROL_PLANE_TIMEOUT_MS=${CONTROL_PLANE_TIMEOUT_MS:-8000}
       - SELF_UPDATE_ENABLED=${SELF_UPDATE_ENABLED:-false}
       - SELF_UPDATE_MODE=${SELF_UPDATE_MODE:-manual_image_ops}
@@ -553,8 +559,8 @@ AUTH_SECRET=$(openssl rand -hex 32)
 CREDENTIAL_SECRET=$(openssl rand -hex 32)
 TENANT_CODE=${TENANT_CODE_VALUE}
 APP_SERVER_MODE=user
-CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
-CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL}
+CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY}
 CONTROL_PLANE_TIMEOUT_MS=8000
 IMAGE_REGISTRY=${IMAGE_REGISTRY}
 API_IMAGE=${API_IMAGE}
@@ -581,6 +587,16 @@ ensure_env_var() {
   fi
 }
 
+ensure_env_var_if_missing() {
+  local key="$1"
+  local value="$2"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    ensure_env_var "${key}" "${value}"
+  fi
+}
+
 ensure_secret_var() {
   local key="$1"
   local current
@@ -603,10 +619,10 @@ ensure_env_var "ENABLE_BROWSER_EXECUTION" "${ENABLE_BROWSER}"
 ensure_env_var "TZ" "Asia/Shanghai"
 ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
 ensure_env_var "NODE_ENV" "production"
-ensure_env_var "TENANT_CODE" "tenant-$(openssl rand -hex 6)"
+ensure_env_var_if_missing "TENANT_CODE" "tenant-$(openssl rand -hex 6)"
 ensure_env_var "APP_SERVER_MODE" "user"
-ensure_env_var "CONTROL_PLANE_BASE_URL" "${CONTROL_PLANE_BASE_URL:-}"
-ensure_env_var "CONTROL_PLANE_SHARED_KEY" "${CONTROL_PLANE_SHARED_KEY:-}"
+ensure_env_var "CONTROL_PLANE_BASE_URL" "${CONTROL_PLANE_BASE_URL}"
+ensure_env_var "CONTROL_PLANE_SHARED_KEY" "${CONTROL_PLANE_SHARED_KEY}"
 ensure_env_var "CONTROL_PLANE_TIMEOUT_MS" "8000"
 ensure_env_var "SELF_UPDATE_ENABLED" "false"
 ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
@@ -670,7 +686,4 @@ if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
 else
   echo "URL: http://<YOUR_VPS_PUBLIC_IP>"
 fi
-
-
-
 
