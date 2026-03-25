@@ -34,3 +34,10 @@ sudo bash /tmp/install_control_plane_vps.sh
 ```
 
 The script is self-contained in this public repo and does not require cloning the private app repository.
+
+## 4) Control plane update (website/admin)
+
+```bash
+cd /opt/bbauto-control-plane
+sudo bash scripts/update_control_plane_site.sh
+```
