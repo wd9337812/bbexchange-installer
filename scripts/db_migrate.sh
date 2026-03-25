@@ -33,7 +33,59 @@ fi
 
 run_psql_stdin() {
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null
+    sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}'" >/dev/null
+}
+
+run_super_psql_stdin() {
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    psql -v ON_ERROR_STOP=1 -U postgres -d postgres >/dev/null
+}
+
+run_psql_cmd() {
+  sql="$1"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -c \"$sql\"" >/dev/null
+}
+
+sql_escape_literal() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+ensure_app_identity() {
+  APP_USER="${POSTGRES_USER:-bb}"
+  APP_DB="${POSTGRES_DB:-bbexchange}"
+  APP_PASS="${POSTGRES_PASSWORD:-bb_change_me}"
+  APP_USER_ESC="$(sql_escape_literal "$APP_USER")"
+  APP_DB_ESC="$(sql_escape_literal "$APP_DB")"
+  APP_PASS_ESC="$(sql_escape_literal "$APP_PASS")"
+
+  if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${APP_PASS}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${APP_USER}' -d '${APP_DB}' -c 'select 1;' >/dev/null" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "db_migrate: app db credential mismatch detected, repairing role/db mapping..."
+  cat <<EOF | run_super_psql_stdin
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${APP_USER_ESC}') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  ELSE
+    EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='${APP_DB_ESC}') THEN
+    EXECUTE format('CREATE DATABASE %I OWNER %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+  END IF;
+  EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+END
+\$\$;
+EOF
+
+  if ! docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${APP_PASS}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${APP_USER}' -d '${APP_DB}' -c 'select 1;' >/dev/null" >/dev/null 2>&1; then
+    echo "db_migrate: failed to repair app db credential"
+    exit 1
+  fi
 }
 
 load_baseline_sql() {
@@ -71,7 +123,7 @@ READY=false
 i=0
 while [ $i -lt 60 ]; do
   if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-    pg_isready -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null 2>&1; then
+    pg_isready -U postgres -d postgres >/dev/null 2>&1; then
     READY=true
     break
   fi
@@ -84,35 +136,28 @@ if [ "$READY" != "true" ]; then
   exit 1
 fi
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
-  -c "create table if not exists schema_migrations (version varchar(255) primary key, applied_at timestamptz not null default now());" >/dev/null
+ensure_app_identity
+run_psql_cmd "create table if not exists schema_migrations (version varchar(255) primary key, applied_at timestamptz not null default now());"
 
 TASK_EXISTS="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" -tAc \
-  "select 1 from pg_tables where schemaname='public' and tablename='tasks' limit 1;" | tr -d '[:space:]')"
+  sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -tAc \"select 1 from pg_tables where schemaname='public' and tablename='tasks' limit 1;\"" | tr -d '[:space:]')"
 
 if [ "$TASK_EXISTS" != "1" ]; then
   echo "db_migrate: applying baseline schema..."
   load_baseline_sql | run_psql_stdin
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
-    -c "insert into schema_migrations(version) values('0000_phase1_schema') on conflict do nothing;" >/dev/null
+  run_psql_cmd "insert into schema_migrations(version) values('0000_phase1_schema') on conflict do nothing;"
 fi
 
 for v in $(list_migration_files); do
     applied="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-      psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" -tAc \
-      "select 1 from schema_migrations where version='${v}' limit 1;" | tr -d '[:space:]')"
+      sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -tAc \"select 1 from schema_migrations where version='${v}' limit 1;\"" | tr -d '[:space:]')"
     if [ "$applied" = "1" ]; then
       echo "db_migrate: skip $v"
       continue
     fi
     echo "db_migrate: apply $v"
     load_migration_sql "$v" | run_psql_stdin
-    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-      psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
-      -c "insert into schema_migrations(version) values('${v}');" >/dev/null
+    run_psql_cmd "insert into schema_migrations(version) values('${v}');"
 done
 
 echo "db_migrate: done"

@@ -26,13 +26,49 @@ fi
 mkdir -p "$BACKUP_ROOT/postgres" "$BACKUP_ROOT/files"
 TS="$(date +%Y%m%d_%H%M%S)"
 
+sql_escape_literal() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+ensure_app_identity() {
+  APP_USER="${POSTGRES_USER:-bb}"
+  APP_DB="${POSTGRES_DB:-bbexchange}"
+  APP_PASS="${POSTGRES_PASSWORD:-bb_change_me}"
+  APP_USER_ESC="$(sql_escape_literal "$APP_USER")"
+  APP_DB_ESC="$(sql_escape_literal "$APP_DB")"
+  APP_PASS_ESC="$(sql_escape_literal "$APP_PASS")"
+
+  if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${APP_PASS}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${APP_USER}' -d '${APP_DB}' -c 'select 1;' >/dev/null" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "db_backup: app db credential mismatch detected, repairing role/db mapping..."
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    psql -v ON_ERROR_STOP=1 -U postgres -d postgres <<EOF >/dev/null
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${APP_USER_ESC}') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  ELSE
+    EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='${APP_DB_ESC}') THEN
+    EXECUTE format('CREATE DATABASE %I OWNER %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+  END IF;
+  EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+END
+\$\$;
+EOF
+}
+
 if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d "$POSTGRES_SERVICE" >/dev/null
   READY=false
   i=0
   while [ $i -lt 60 ]; do
     if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-      pg_isready -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null 2>&1; then
+      pg_isready -U postgres -d postgres >/dev/null 2>&1; then
       READY=true
       break
     fi
@@ -43,9 +79,10 @@ if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
     echo "db_backup: postgres is not ready"
     exit 1
   fi
+  ensure_app_identity
   echo "db_backup: postgres dump..."
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-    sh -lc "pg_dump -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -Fc" \
+    sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' pg_dump -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -Fc" \
     > "$BACKUP_ROOT/postgres/pg_${TS}.dump"
 fi
 
