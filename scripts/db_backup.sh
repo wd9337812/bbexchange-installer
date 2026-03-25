@@ -5,6 +5,7 @@ COMPOSE_FILE="${1:-deploy/docker-compose.prod.yml}"
 ENV_FILE="${2:-.env.prod}"
 BACKUP_ROOT="${BACKUP_ROOT:-apps/backend/data/backups}"
 KEEP_COUNT="${BACKUP_KEEP_COUNT:-10}"
+POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres}"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "env file not found: $ENV_FILE"
@@ -15,15 +16,22 @@ set -a
 . "./$ENV_FILE"
 set +a
 
+SERVICES="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --services 2>/dev/null || true)"
+if ! printf '%s\n' "$SERVICES" | grep -qx "$POSTGRES_SERVICE"; then
+  if printf '%s\n' "$SERVICES" | grep -qx "postgres_admin"; then
+    POSTGRES_SERVICE="postgres_admin"
+  fi
+fi
+
 mkdir -p "$BACKUP_ROOT/postgres" "$BACKUP_ROOT/files"
 TS="$(date +%Y%m%d_%H%M%S)"
 
 if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres >/dev/null
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d "$POSTGRES_SERVICE" >/dev/null
   READY=false
   i=0
   while [ $i -lt 60 ]; do
-    if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+    if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
       pg_isready -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null 2>&1; then
       READY=true
       break
@@ -36,7 +44,7 @@ if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
     exit 1
   fi
   echo "db_backup: postgres dump..."
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
     sh -lc "pg_dump -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -Fc" \
     > "$BACKUP_ROOT/postgres/pg_${TS}.dump"
 fi
