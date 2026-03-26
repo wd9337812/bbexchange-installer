@@ -31,9 +31,14 @@ services:
       - PORT=3000
       - TZ=${TZ:-Asia/Shanghai}
       - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      - TENANT_CODE=${TENANT_CODE:-local}
       - REDIS_URL=redis://redis:6379
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
+      - APP_SERVER_MODE=${APP_SERVER_MODE:-user}
+      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
+      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+      - CONTROL_PLANE_TIMEOUT_MS=${CONTROL_PLANE_TIMEOUT_MS:-10000}
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
       - AUTH_SECRET=${AUTH_SECRET}
       - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
@@ -60,9 +65,14 @@ services:
       - NODE_ENV=${NODE_ENV:-production}
       - TZ=${TZ:-Asia/Shanghai}
       - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      - TENANT_CODE=${TENANT_CODE:-local}
       - REDIS_URL=redis://redis:6379
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
+      - APP_SERVER_MODE=${APP_SERVER_MODE:-user}
+      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
+      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+      - CONTROL_PLANE_TIMEOUT_MS=${CONTROL_PLANE_TIMEOUT_MS:-10000}
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
       - BROWSER_POOL_SIZE=${BROWSER_POOL_SIZE:-4}
       - OFFER_NAV_TIMEOUT_MS=${OFFER_NAV_TIMEOUT_MS:-20000}
@@ -94,6 +104,5 @@ volumes:
   pg_data:
   caddy_data:
   caddy_config:
-
 
 
