@@ -19,8 +19,8 @@ ENABLE_BROWSER="${ENABLE_BROWSER:-true}"
 STORAGE_MODE="${STORAGE_MODE:-postgres}"
 REGISTRY_USER="${REGISTRY_USER:-}"
 REGISTRY_TOKEN="${REGISTRY_TOKEN:-}"
-CONTROL_PLANE_BASE_URL="${CONTROL_PLANE_BASE_URL:-https://license.bbauto.top}"
-CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-92484cd311791604e8c9c96aa310770f5d7b0cefa7aa5a78992f778d6eb9733e}"
+CONTROL_PLANE_BASE_URL="${CONTROL_PLANE_BASE_URL:-}"
+CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-}"
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -42,7 +42,7 @@ Options:
   --enable-browser <true|false> Enable browser execution (default: ${ENABLE_BROWSER})
   --storage <postgres|file>    Storage mode (default: ${STORAGE_MODE})
   --control-plane-url <url>    Control-plane base url (default: ${CONTROL_PLANE_BASE_URL})
-  --control-plane-key <key>    Control-plane shared key (default: built-in)
+  --control-plane-key <key>    Control-plane shared key
   --registry-user <username>   Optional registry username
   --registry-token <token>     Optional registry token/password
   -h, --help                   Show help
@@ -117,6 +117,17 @@ if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
   fi
 else
   EMAIL=""
+fi
+
+if [[ -z "${CONTROL_PLANE_BASE_URL}" ]]; then
+  read -rp "Input control-plane license URL (e.g. https://license.bbauto.top): " CONTROL_PLANE_BASE_URL
+fi
+if [[ -z "${CONTROL_PLANE_SHARED_KEY}" ]]; then
+  read -rp "Input control-plane shared key: " CONTROL_PLANE_SHARED_KEY
+fi
+if [[ -z "${CONTROL_PLANE_BASE_URL}" || -z "${CONTROL_PLANE_SHARED_KEY}" ]]; then
+  echo "CONTROL_PLANE_BASE_URL and CONTROL_PLANE_SHARED_KEY are required."
+  exit 1
 fi
 
 echo "[1/7] Installing runtime dependencies..."
@@ -427,6 +438,49 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   exit 1
 fi
 
+get_env_var() {
+  local key="$1"
+  sed -n "s/^${key}=//p" "${ENV_FILE}" | head -n 1
+}
+
+require_control_plane_for_user_mode() {
+  local mode cp_url cp_key tenant_code
+  mode="$(get_env_var APP_SERVER_MODE)"
+  mode="${mode:-user}"
+  if [[ "${mode}" != "user" ]]; then
+    return 0
+  fi
+  cp_url="$(get_env_var CONTROL_PLANE_BASE_URL)"
+  cp_key="$(get_env_var CONTROL_PLANE_SHARED_KEY)"
+  tenant_code="$(get_env_var TENANT_CODE)"
+  tenant_code="${tenant_code:-local}"
+
+  if [[ -z "${cp_url}" || -z "${cp_key}" ]]; then
+    echo "[update] ERROR: user mode requires CONTROL_PLANE_BASE_URL and CONTROL_PLANE_SHARED_KEY in ${ENV_FILE}"
+    exit 31
+  fi
+
+  if [[ "${SKIP_CONTROL_PLANE_CHECK:-false}" == "true" ]]; then
+    echo "[update] WARN: skip control-plane connectivity check (SKIP_CONTROL_PLANE_CHECK=true)"
+    return 0
+  fi
+
+  local probe_url code body
+  probe_url="${cp_url%/}/api/internal/subscription/current?tenantCode=${tenant_code}"
+  body="$(mktemp)"
+  code="$(curl -sS -m 12 -o "${body}" -w "%{http_code}" \
+    -H "X-Control-Plane-Key: ${cp_key}" \
+    -H "X-Tenant-Code: ${tenant_code}" \
+    "${probe_url}" || true)"
+  if [[ "${code}" != "200" ]]; then
+    echo "[update] ERROR: control plane probe failed, code=${code}, url=${probe_url}"
+    echo "[update] response: $(head -c 300 "${body}" 2>/dev/null || true)"
+    rm -f "${body}" >/dev/null 2>&1 || true
+    exit 32
+  fi
+  rm -f "${body}" >/dev/null 2>&1 || true
+}
+
 ensure_env_var() {
   local key="$1"
   local value="$2"
@@ -440,6 +494,7 @@ ensure_env_var() {
 ensure_env_var "TZ" "Asia/Shanghai"
 ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
 ensure_env_var "NODE_ENV" "production"
+require_control_plane_for_user_mode
 
 if [[ -z "${TARGET_TAG}" ]]; then
   TARGET_TAG="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_TAG=//p' "${ENV_FILE}" | head -n 1)"
@@ -678,6 +733,21 @@ docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d api
 sleep 3
 curl -fsS http://127.0.0.1/api/health
 
+TENANT_CODE_VALUE="$(sed -n 's/^TENANT_CODE=//p' .env.prod | head -n 1)"
+PROBE_URL="${CONTROL_PLANE_BASE_URL%/}/api/internal/subscription/current?tenantCode=${TENANT_CODE_VALUE}"
+PROBE_BODY="$(mktemp)"
+PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+  -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+  -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+  "${PROBE_URL}" || true)"
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "Control-plane probe failed (code=${PROBE_CODE}): ${PROBE_URL}"
+  echo "Response: $(head -c 300 "${PROBE_BODY}" 2>/dev/null || true)"
+  rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+  exit 1
+fi
+rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+
 echo ""
 echo "Install complete."
 echo "Status: docker compose --env-file .env.prod -f deploy/docker-compose.image.yml ps"
@@ -686,4 +756,3 @@ if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
 else
   echo "URL: http://<YOUR_VPS_PUBLIC_IP>"
 fi
-
