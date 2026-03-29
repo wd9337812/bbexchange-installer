@@ -147,9 +147,10 @@ self_update_ops_assets() {
   fetch_one "deploy/docker-compose.admin.image.yml"
   fetch_one "scripts/db_migrate.sh"
   fetch_one "scripts/db_backup.sh"
+  fetch_one "scripts/bootstrap_btcpay_payment_settings.sh"
   fetch_one "scripts/update_control_plane_site.sh"
   rm -f "${tmp}" >/dev/null 2>&1 || true
-  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/update_control_plane_site.sh >/dev/null 2>&1 || true
+  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/bootstrap_btcpay_payment_settings.sh scripts/update_control_plane_site.sh >/dev/null 2>&1 || true
 }
 
 rollback() {
@@ -230,5 +231,12 @@ if ! curl -fsS http://127.0.0.1:3111/api/public/bootstrap-status >/dev/null; the
 fi
 
 echo "[6/6] Done."
+echo "[post] Sync BTCPay test/live settings..."
+if [[ -x scripts/bootstrap_btcpay_payment_settings.sh ]]; then
+  sh scripts/bootstrap_btcpay_payment_settings.sh "${COMPOSE_FILE}" "${ENV_FILE}" || true
+else
+  echo "[post] bootstrap_btcpay_payment_settings.sh missing, skipped."
+fi
+
 echo "Control-plane update complete."
 echo "Current tag: ${TARGET_TAG}"

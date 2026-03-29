@@ -140,10 +140,11 @@ echo "[3/7] Copying deployment assets..."
 cp -f "${REPO_DIR}/deploy/docker-compose.admin.image.yml" "${INSTALL_DIR}/deploy/docker-compose.admin.image.yml"
 cp -f "${REPO_DIR}/scripts/db_migrate.sh" "${INSTALL_DIR}/scripts/db_migrate.sh"
 cp -f "${REPO_DIR}/scripts/db_backup.sh" "${INSTALL_DIR}/scripts/db_backup.sh"
+cp -f "${REPO_DIR}/scripts/bootstrap_btcpay_payment_settings.sh" "${INSTALL_DIR}/scripts/bootstrap_btcpay_payment_settings.sh"
 cp -f "${REPO_DIR}/scripts/update_control_plane_site.sh" "${INSTALL_DIR}/scripts/update_control_plane_site.sh"
 cp -rf "${REPO_DIR}/apps/backend/sql/migrations" "${INSTALL_DIR}/apps/backend/sql/" 2>/dev/null || true
 cp -f "${REPO_DIR}/apps/backend/sql/phase1_schema.sql" "${INSTALL_DIR}/apps/backend/sql/phase1_schema.sql"
-chmod +x "${INSTALL_DIR}/scripts/db_migrate.sh" "${INSTALL_DIR}/scripts/db_backup.sh" "${INSTALL_DIR}/scripts/update_control_plane_site.sh"
+chmod +x "${INSTALL_DIR}/scripts/db_migrate.sh" "${INSTALL_DIR}/scripts/db_backup.sh" "${INSTALL_DIR}/scripts/bootstrap_btcpay_payment_settings.sh" "${INSTALL_DIR}/scripts/update_control_plane_site.sh"
 
 echo "[4/7] Writing env file..."
 cat > "${INSTALL_DIR}/.env.admin.prod" <<EOF
@@ -163,6 +164,16 @@ IMAGE_TAG=${IMAGE_TAG}
 ADMIN_DEFAULT_PASSWORD=${ADMIN_DEFAULT_PASSWORD}
 APP_SERVER_MODE=control
 CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY_VALUE}
+BTCPAY_BASE_URL_TEST=
+BTCPAY_STORE_ID_TEST=
+BTCPAY_API_KEY_TEST=
+BTCPAY_WEBHOOK_SECRET_TEST=${CONTROL_PLANE_SHARED_KEY_VALUE}
+BTCPAY_USDT_CURRENCY_CODE_TEST=USDT_TRON
+BTCPAY_BASE_URL_LIVE=
+BTCPAY_STORE_ID_LIVE=
+BTCPAY_API_KEY_LIVE=
+BTCPAY_WEBHOOK_SECRET_LIVE=${CONTROL_PLANE_SHARED_KEY_VALUE}
+BTCPAY_USDT_CURRENCY_CODE_LIVE=USDT_TRON
 EOF
 
 echo "[5/7] Writing Caddy config..."
@@ -207,6 +218,7 @@ docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.y
 sh scripts/db_migrate.sh "deploy/docker-compose.admin.image.yml" ".env.admin.prod"
 docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml pull api_admin || true
 docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml up -d api_admin caddy_admin
+sh scripts/bootstrap_btcpay_payment_settings.sh "deploy/docker-compose.admin.image.yml" ".env.admin.prod" || true
 
 echo "[7/7] Done."
 echo ""
