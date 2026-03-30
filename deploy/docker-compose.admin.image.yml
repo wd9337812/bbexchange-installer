@@ -1,4 +1,4 @@
-services:
+﻿services:
   redis_admin:
     image: redis:7-alpine
     container_name: bbexchange-admin-redis
@@ -37,7 +37,7 @@ services:
       - pg_btcpay_data:/var/lib/postgresql/data
 
   btcpay_server:
-    image: btcpayserver/btcpayserver:2.2.2
+    image: btcpayserver/btcpayserver:2.3.6
     container_name: bbexchange-btcpay-server
     restart: unless-stopped
     environment:
@@ -107,3 +107,4 @@ volumes:
   btcpay_data:
   caddy_admin_data:
   caddy_admin_config:
+
