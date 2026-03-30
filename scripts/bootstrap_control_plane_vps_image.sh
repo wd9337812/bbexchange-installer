@@ -31,6 +31,16 @@ existing_env_value() {
     sed -n "s/^${key}=//p" "$file" | head -n 1
   fi
 }
+write_env() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+  if grep -q "^${key}=" "$file"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$file"
+  else
+    echo "${key}=${value}" >> "$file"
+  fi
+}
 random_hex() {
   local len="${1:-32}"
   openssl rand -hex "$len"
