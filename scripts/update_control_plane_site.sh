@@ -16,6 +16,7 @@ REQUIRED_FREE_GB="${REQUIRED_FREE_GB:-4}"
 REQUIRED_FREE_INODE_PERCENT="${REQUIRED_FREE_INODE_PERCENT:-10}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
+REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-true}"
 INSTALLER_RAW_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
 
 read_env() {
@@ -164,6 +165,22 @@ rollback() {
   docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d api_admin caddy_admin || true
 }
 
+print_runtime_summary() {
+  local cid image_id started_at digest
+  cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q api_admin 2>/dev/null || true)"
+  if [[ -z "${cid}" ]]; then
+    echo "[summary] api_admin container not found."
+    return 0
+  fi
+  image_id="$(docker inspect -f '{{.Image}}' "${cid}" 2>/dev/null || true)"
+  started_at="$(docker inspect -f '{{.State.StartedAt}}' "${cid}" 2>/dev/null || true)"
+  digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${API_IMAGE_REF}" 2>/dev/null || true)"
+  echo "[summary] api_admin container=${cid}"
+  echo "[summary] api_admin image_id=${image_id}"
+  echo "[summary] api_admin started_at=${started_at}"
+  echo "[summary] api_admin pulled_digest=${digest:-unknown}"
+}
+
 cd "${INSTALL_DIR}"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -202,10 +219,20 @@ echo "[1/6] Backup control-plane data..."
 sh scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[2/6] Pull target api image (${TARGET_TAG})..."
+before_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 write_env "IMAGE_TAG" "${TARGET_TAG}" "${ENV_FILE}"
 if ! docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" pull api_admin; then
   rollback "${CURRENT_TAG}"
   exit 1
+fi
+after_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
+if [[ "${TARGET_TAG}" == "latest" && -n "${before_api_id}" && -n "${after_api_id}" && "${before_api_id}" == "${after_api_id}" ]]; then
+  echo "[update] no new image pulled for tag 'latest'. Build may still be running or latest has not changed."
+  echo "[update] current api image id: ${after_api_id}"
+  if bool_true "${REQUIRE_NEW_IMAGE}"; then
+    exit 2
+  fi
+  echo "[update] REQUIRE_NEW_IMAGE=false, continue with current image."
 fi
 
 echo "[3/6] Run db migrations from image SQL..."
@@ -240,3 +267,4 @@ fi
 
 echo "Control-plane update complete."
 echo "Current tag: ${TARGET_TAG}"
+print_runtime_summary

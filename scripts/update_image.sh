@@ -11,6 +11,7 @@ REQUIRED_FREE_GB="${REQUIRED_FREE_GB:-6}"
 REQUIRED_FREE_INODE_PERCENT="${REQUIRED_FREE_INODE_PERCENT:-10}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
+REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-true}"
 
 cd "${REPO_DIR}"
 
@@ -24,8 +25,18 @@ get_env_var() {
   sed -n "s/^${key}=//p" "${ENV_FILE}" | head -n 1
 }
 
+set_env_var() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" "${ENV_FILE}"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "${ENV_FILE}"
+  else
+    echo "${key}=${value}" >> "${ENV_FILE}"
+  fi
+}
+
 require_control_plane_for_user_mode() {
-  local mode cp_url cp_key tenant_code
+  local mode cp_url cp_key tenant_code body code host_hint
   mode="$(get_env_var APP_SERVER_MODE)"
   mode="${mode:-user}"
   if [[ "${mode}" != "user" ]]; then
@@ -34,11 +45,26 @@ require_control_plane_for_user_mode() {
   cp_url="$(get_env_var CONTROL_PLANE_BASE_URL)"
   cp_key="$(get_env_var CONTROL_PLANE_SHARED_KEY)"
   tenant_code="$(get_env_var TENANT_CODE)"
-  tenant_code="${tenant_code:-local}"
 
   if [[ -z "${cp_url}" || -z "${cp_key}" ]]; then
     echo "[update] ERROR: user mode requires CONTROL_PLANE_BASE_URL and CONTROL_PLANE_SHARED_KEY in ${ENV_FILE}"
     exit 31
+  fi
+
+  if [[ -z "${tenant_code}" ]]; then
+    host_hint="$(hostname 2>/dev/null || echo tenant)"
+    body="$(curl -sS -m 15 -X POST "${cp_url%/}/api/internal/tenant/register" \
+      -H "Content-Type: application/json" \
+      -H "X-Control-Plane-Key: ${cp_key}" \
+      -H "X-Tenant-Code: bootstrap" \
+      -d "{\"tenantName\":\"${host_hint}\"}" || true)"
+    tenant_code="$(printf '%s' "${body}" | sed -n 's/.*"tenantCode":"\([^"]*\)".*/\1/p' | head -n 1)"
+    if [[ -z "${tenant_code}" ]]; then
+      echo "[update] ERROR: auto register tenant failed: ${body}"
+      exit 31
+    fi
+    set_env_var "TENANT_CODE" "${tenant_code}"
+    echo "[update] auto registered tenant code: ${tenant_code}"
   fi
 
   if [[ "${SKIP_CONTROL_PLANE_CHECK:-false}" == "true" ]]; then
@@ -46,7 +72,7 @@ require_control_plane_for_user_mode() {
     return 0
   fi
 
-  local probe_url code body
+  local probe_url
   probe_url="${cp_url%/}/api/internal/subscription/current?tenantCode=${tenant_code}"
   body="$(mktemp)"
   code="$(curl -sS -m 12 -o "${body}" -w "%{http_code}" \
@@ -275,7 +301,10 @@ if [[ "${TARGET_TAG}" == "latest" && -n "${before_api_id}" && -n "${after_api_id
   echo "[update] no new image pulled for tag 'latest'. Build may still be running or latest has not changed."
   echo "[update] current api image id: ${after_api_id}"
   echo "[update] current worker image id: ${after_worker_id}"
-  exit 2
+  if bool_true "${REQUIRE_NEW_IMAGE}"; then
+    exit 2
+  fi
+  echo "[update] REQUIRE_NEW_IMAGE=false, continue with current images."
 fi
 
 echo "[update] migrate schema from image: ${API_IMAGE_REF}"
@@ -288,3 +317,11 @@ echo "[update] health check"
 curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null
 
 echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
+api_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q api 2>/dev/null || true)"
+worker_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q worker 2>/dev/null || true)"
+api_started="$(docker inspect -f '{{.State.StartedAt}}' "${api_cid}" 2>/dev/null || true)"
+worker_started="$(docker inspect -f '{{.State.StartedAt}}' "${worker_cid}" 2>/dev/null || true)"
+api_digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${API_IMAGE_REF}" 2>/dev/null || true)"
+worker_digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${WORKER_IMAGE_REF}" 2>/dev/null || true)"
+echo "[summary] api image id=${after_api_id} started_at=${api_started} digest=${api_digest:-unknown}"
+echo "[summary] worker image id=${after_worker_id} started_at=${worker_started} digest=${worker_digest:-unknown}"
