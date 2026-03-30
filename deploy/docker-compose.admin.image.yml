@@ -22,6 +22,41 @@ services:
     volumes:
       - pg_admin_data:/var/lib/postgresql/data
 
+  postgres_btcpay:
+    image: postgres:16-alpine
+    container_name: bbexchange-btcpay-postgres
+    restart: unless-stopped
+    command: ["postgres", "-c", "timezone=Asia/Shanghai"]
+    environment:
+      - POSTGRES_USER=${BTCPAY_DB_USER:-btcpay}
+      - POSTGRES_PASSWORD=${BTCPAY_DB_PASSWORD:-btcpay_change_me}
+      - POSTGRES_DB=${BTCPAY_DB_NAME:-btcpayserver}
+      - TZ=${TZ:-Asia/Shanghai}
+      - PGTZ=${TZ:-Asia/Shanghai}
+    volumes:
+      - pg_btcpay_data:/var/lib/postgresql/data
+
+  btcpay_server:
+    image: btcpayserver/btcpayserver:2.2.2
+    container_name: bbexchange-btcpay-server
+    restart: unless-stopped
+    environment:
+      - ASPNETCORE_URLS=http://0.0.0.0:23000
+      - BTCPAY_DATADIR=/data
+      - BTCPAY_POSTGRES=User ID=${BTCPAY_DB_USER:-btcpay};Password=${BTCPAY_DB_PASSWORD:-btcpay_change_me};Host=postgres_btcpay;Port=5432;Database=${BTCPAY_DB_NAME:-btcpayserver};Pooling=true;
+      - ConnectionStrings__DefaultConnection=User ID=${BTCPAY_DB_USER:-btcpay};Password=${BTCPAY_DB_PASSWORD:-btcpay_change_me};Host=postgres_btcpay;Port=5432;Database=${BTCPAY_DB_NAME:-btcpayserver};Pooling=true;
+      - BTCPAY_EXTERNALURL=${BTCPAY_EXTERNAL_URL:-}
+      - BTCPAY_ROOTAPPID=BBCloud
+      - BTCPAY_CHAINS=${BTCPAY_CHAINS:-btc}
+      - BTCPAY_NETWORK=${BTCPAY_NETWORK:-mainnet}
+      - BTCPAY_ALLOW_ADMIN_REGISTRATION=true
+    ports:
+      - "${BTCPAY_PORT:-23000}:23000"
+    volumes:
+      - btcpay_data:/data
+    depends_on:
+      - postgres_btcpay
+
   api_admin:
     image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
     container_name: bbexchange-api-admin
@@ -63,9 +98,12 @@ services:
       - caddy_admin_config:/config
     depends_on:
       - api_admin
+      - btcpay_server
 
 volumes:
   redis_admin_data:
   pg_admin_data:
+  pg_btcpay_data:
+  btcpay_data:
   caddy_admin_data:
   caddy_admin_config:

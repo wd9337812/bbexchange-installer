@@ -18,6 +18,7 @@ SSL_MODE="${SSL_MODE:-auto}"
 PUBLIC_DOMAIN="${PUBLIC_DOMAIN:-}"
 ADMIN_DOMAIN="${ADMIN_DOMAIN:-}"
 LICENSE_DOMAIN="${LICENSE_DOMAIN:-}"
+PAY_DOMAIN="${PAY_DOMAIN:-}"
 EMAIL="${EMAIL:-}"
 ADMIN_DEFAULT_PASSWORD="${ADMIN_DEFAULT_PASSWORD:-}"
 ENV_FILE="${INSTALL_DIR}/.env.admin.prod"
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --public-domain) PUBLIC_DOMAIN="$2"; shift 2 ;;
     --admin-domain) ADMIN_DOMAIN="$2"; shift 2 ;;
     --license-domain) LICENSE_DOMAIN="$2"; shift 2 ;;
+    --pay-domain) PAY_DOMAIN="$2"; shift 2 ;;
     --email) EMAIL="$2"; shift 2 ;;
     --admin-password) ADMIN_DEFAULT_PASSWORD="$2"; shift 2 ;;
     *) shift ;;
@@ -80,6 +82,12 @@ if [[ "${SSL_MODE}" == "on" ]]; then
   if [[ -z "${LICENSE_DOMAIN}" ]]; then
     read -rp "Input license domain (e.g. license.bbauto.top): " LICENSE_DOMAIN
   fi
+  if [[ -z "${PAY_DOMAIN}" ]]; then
+    read -rp "Input BTCPay domain (e.g. pay.bbauto.top, Enter to use pay.${PUBLIC_DOMAIN}): " PAY_DOMAIN
+  fi
+  if [[ -z "${PAY_DOMAIN}" ]]; then
+    PAY_DOMAIN="pay.${PUBLIC_DOMAIN}"
+  fi
   if [[ ! "${PUBLIC_DOMAIN}" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
     echo "Invalid public domain: ${PUBLIC_DOMAIN}"
     exit 1
@@ -90,6 +98,10 @@ if [[ "${SSL_MODE}" == "on" ]]; then
   fi
   if [[ ! "${LICENSE_DOMAIN}" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
     echo "Invalid license domain: ${LICENSE_DOMAIN}"
+    exit 1
+  fi
+  if [[ ! "${PAY_DOMAIN}" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+    echo "Invalid BTCPay domain: ${PAY_DOMAIN}"
     exit 1
   fi
   if [[ -z "${EMAIL}" ]]; then
@@ -174,7 +186,21 @@ BTCPAY_STORE_ID_LIVE=
 BTCPAY_API_KEY_LIVE=
 BTCPAY_WEBHOOK_SECRET_LIVE=${CONTROL_PLANE_SHARED_KEY_VALUE}
 BTCPAY_USDT_CURRENCY_CODE_LIVE=USDT_TRON
+BTCPAY_ENABLE=true
+BTCPAY_PORT=23000
+BTCPAY_DB_USER=btcpay
+BTCPAY_DB_PASSWORD=$(random_hex 16)
+BTCPAY_DB_NAME=btcpayserver
+BTCPAY_NETWORK=mainnet
+BTCPAY_CHAINS=btc
+BTCPAY_EXTERNAL_URL=
 EOF
+
+if [[ "${SSL_MODE}" == "off" ]]; then
+  write_env "BTCPAY_EXTERNAL_URL" "" "${INSTALL_DIR}/.env.admin.prod"
+else
+  write_env "BTCPAY_EXTERNAL_URL" "https://${PAY_DOMAIN}" "${INSTALL_DIR}/.env.admin.prod"
+fi
 
 echo "[5/7] Writing Caddy config..."
 if [[ "${SSL_MODE}" == "on" ]]; then
@@ -199,6 +225,11 @@ ${LICENSE_DOMAIN} {
   encode gzip
   reverse_proxy api_admin:3000
 }
+
+${PAY_DOMAIN} {
+  encode gzip
+  reverse_proxy btcpay_server:23000
+}
 EOF
   ufw allow 80/tcp >/dev/null 2>&1 || true
   ufw allow 443/tcp >/dev/null 2>&1 || true
@@ -215,9 +246,10 @@ fi
 echo "[6/7] Starting containers and migrating schema..."
 cd "${INSTALL_DIR}"
 docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml up -d redis_admin postgres_admin
+docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml up -d postgres_btcpay btcpay_server
 sh scripts/db_migrate.sh "deploy/docker-compose.admin.image.yml" ".env.admin.prod"
 docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml pull api_admin || true
-docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml up -d api_admin caddy_admin
+docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml up -d api_admin caddy_admin btcpay_server
 sh scripts/bootstrap_btcpay_payment_settings.sh "deploy/docker-compose.admin.image.yml" ".env.admin.prod" || true
 
 echo "[7/7] Done."
@@ -227,10 +259,12 @@ if [[ "${SSL_MODE}" == "on" ]]; then
   echo "Website URL: https://${PUBLIC_DOMAIN}"
   echo "Admin URL: https://${ADMIN_DOMAIN}/admin"
   echo "License URL(for user instances): https://${LICENSE_DOMAIN}"
+  echo "BTCPay URL: https://${PAY_DOMAIN}"
 else
   echo "Website URL: http://<YOUR_VPS_IP>"
   echo "Admin URL: http://<YOUR_VPS_IP>/admin"
   echo "License URL(for user instances): http://<YOUR_VPS_IP>"
+  echo "BTCPay URL: http://<YOUR_VPS_IP>:23000"
 fi
 echo "Admin username: admin"
 echo "Admin initial password: ${ADMIN_DEFAULT_PASSWORD}"

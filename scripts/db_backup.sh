@@ -22,6 +22,10 @@ if ! printf '%s\n' "$SERVICES" | grep -qx "$POSTGRES_SERVICE"; then
     POSTGRES_SERVICE="postgres_admin"
   fi
 fi
+HAS_BTCPAY_POSTGRES=false
+if printf '%s\n' "$SERVICES" | grep -qx "postgres_btcpay"; then
+  HAS_BTCPAY_POSTGRES=true
+fi
 
 mkdir -p "$BACKUP_ROOT/postgres" "$BACKUP_ROOT/files"
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -65,11 +69,14 @@ EOF
 
 if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d "$POSTGRES_SERVICE" >/dev/null
+  if [ "$HAS_BTCPAY_POSTGRES" = "true" ]; then
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres_btcpay >/dev/null
+  fi
   READY=false
   i=0
   while [ $i -lt 60 ]; do
     if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-      pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+      pg_isready -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null 2>&1; then
       READY=true
       break
     fi
@@ -85,6 +92,16 @@ if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
     sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' pg_dump -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -Fc" \
     > "$BACKUP_ROOT/postgres/pg_${TS}.dump"
+
+  if [ "$HAS_BTCPAY_POSTGRES" = "true" ] && [ "${BTCPAY_ENABLE:-true}" = "true" ]; then
+    BTCPAY_DB_USER="${BTCPAY_DB_USER:-btcpay}"
+    BTCPAY_DB_PASSWORD="${BTCPAY_DB_PASSWORD:-btcpay_change_me}"
+    BTCPAY_DB_NAME="${BTCPAY_DB_NAME:-btcpayserver}"
+    echo "db_backup: btcpay postgres dump..."
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres_btcpay \
+      sh -lc "PGPASSWORD='${BTCPAY_DB_PASSWORD}' pg_dump -h 127.0.0.1 -U '${BTCPAY_DB_USER}' -d '${BTCPAY_DB_NAME}' -Fc" \
+      > "$BACKUP_ROOT/postgres/btcpay_${TS}.dump" || true
+  fi
 fi
 
 echo "db_backup: file snapshot..."

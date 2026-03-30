@@ -214,8 +214,8 @@ if ! SOURCE_IMAGE="${API_IMAGE_REF}" sh scripts/db_migrate.sh "${COMPOSE_FILE}" 
   exit 1
 fi
 
-echo "[4/6] Restart api + caddy..."
-if ! docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api_admin caddy_admin; then
+echo "[4/6] Restart api + caddy + btcpay..."
+if ! docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate postgres_btcpay btcpay_server api_admin caddy_admin; then
   rollback "${CURRENT_TAG}"
   exit 1
 fi
