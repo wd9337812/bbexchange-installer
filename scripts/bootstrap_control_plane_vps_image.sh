@@ -260,7 +260,7 @@ docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.y
 sh scripts/db_migrate.sh "deploy/docker-compose.admin.image.yml" ".env.admin.prod"
 docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml pull api_admin || true
 docker compose --env-file .env.admin.prod -f deploy/docker-compose.admin.image.yml up -d api_admin caddy_admin btcpay_server
-sh scripts/bootstrap_btcpay_payment_settings.sh "deploy/docker-compose.admin.image.yml" ".env.admin.prod" || true
+bash scripts/bootstrap_btcpay_payment_settings.sh "deploy/docker-compose.admin.image.yml" ".env.admin.prod" || true
 
 echo "[7/7] Done."
 echo ""

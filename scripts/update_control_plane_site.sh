@@ -233,7 +233,7 @@ fi
 echo "[6/6] Done."
 echo "[post] Sync BTCPay test/live settings..."
 if [[ -x scripts/bootstrap_btcpay_payment_settings.sh ]]; then
-  sh scripts/bootstrap_btcpay_payment_settings.sh "${COMPOSE_FILE}" "${ENV_FILE}" || true
+  bash scripts/bootstrap_btcpay_payment_settings.sh "${COMPOSE_FILE}" "${ENV_FILE}" || true
 else
   echo "[post] bootstrap_btcpay_payment_settings.sh missing, skipped."
 fi
