@@ -35,6 +35,55 @@ set_env_var() {
   fi
 }
 
+extract_host_from_url() {
+  local url="${1:-}"
+  printf '%s' "${url}" | sed -E 's#^[A-Za-z]+://([^/:]+).*#\1#'
+}
+
+resolve_ipv4_for_host() {
+  local host="${1:-}"
+  local ip=""
+  if command -v getent >/dev/null 2>&1; then
+    ip="$(getent ahostsv4 "${host}" 2>/dev/null | awk 'NR==1{print $1}')"
+  fi
+  if [[ -z "${ip}" && -x /usr/bin/getent ]]; then
+    ip="$(/usr/bin/getent ahostsv4 "${host}" 2>/dev/null | awk 'NR==1{print $1}')"
+  fi
+  if [[ -z "${ip}" && "$(command -v dig >/dev/null 2>&1; echo $?)" -eq 0 ]]; then
+    ip="$(dig +short "${host}" A | head -n 1)"
+  fi
+  printf '%s' "${ip}"
+}
+
+ensure_control_plane_dns_defaults() {
+  local cp_url cp_host cp_ip
+  cp_url="$(get_env_var CONTROL_PLANE_BASE_URL)"
+  cp_url="${cp_url:-}"
+
+  set_env_var "DOCKER_DNS_1" "${DOCKER_DNS_1:-1.1.1.1}"
+  set_env_var "DOCKER_DNS_2" "${DOCKER_DNS_2:-8.8.8.8}"
+  if [[ -z "${cp_url}" ]]; then
+    return 0
+  fi
+
+  cp_host="$(extract_host_from_url "${cp_url}")"
+  if [[ -z "${cp_host}" || "${cp_host}" == "${cp_url}" ]]; then
+    return 0
+  fi
+
+  cp_ip="$(resolve_ipv4_for_host "${cp_host}")"
+  if [[ -n "${cp_ip}" ]]; then
+    set_env_var "CONTROL_PLANE_DNS_HOST" "${cp_host}"
+    set_env_var "CONTROL_PLANE_DNS_IP" "${cp_ip}"
+    echo "[update] control-plane mapping: ${cp_host} -> ${cp_ip}"
+  else
+    echo "[update] WARN: failed to resolve ${cp_host}, keep existing CONTROL_PLANE_DNS_IP"
+    if [[ -z "$(get_env_var CONTROL_PLANE_DNS_HOST)" ]]; then
+      set_env_var "CONTROL_PLANE_DNS_HOST" "${cp_host}"
+    fi
+  fi
+}
+
 require_control_plane_for_user_mode() {
   local mode cp_url cp_key tenant_code body code host_hint
   mode="$(get_env_var APP_SERVER_MODE)"
@@ -205,6 +254,7 @@ ensure_secret_var() {
 ensure_env_var "TZ" "Asia/Shanghai"
 ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
 ensure_env_var "NODE_ENV" "production"
+ensure_control_plane_dns_defaults
 require_control_plane_for_user_mode
 ensure_secret_var "AUTH_SECRET"
 ensure_secret_var "CREDENTIAL_SECRET"

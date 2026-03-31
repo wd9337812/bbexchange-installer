@@ -26,6 +26,11 @@ services:
     image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
     container_name: bbexchange-api
     restart: unless-stopped
+    dns:
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
+    extra_hosts:
+      - "${CONTROL_PLANE_DNS_HOST:-license.invalid}:${CONTROL_PLANE_DNS_IP:-127.0.0.1}"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3000
@@ -61,6 +66,11 @@ services:
     image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${WORKER_IMAGE:-bbexchange-worker}:${IMAGE_TAG:-latest}
     container_name: bbexchange-worker
     restart: unless-stopped
+    dns:
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
+    extra_hosts:
+      - "${CONTROL_PLANE_DNS_HOST:-license.invalid}:${CONTROL_PLANE_DNS_IP:-127.0.0.1}"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - TZ=${TZ:-Asia/Shanghai}
@@ -104,5 +114,4 @@ volumes:
   pg_data:
   caddy_data:
   caddy_config:
-
 

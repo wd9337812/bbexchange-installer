@@ -24,6 +24,26 @@ CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-}"
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
+extract_host_from_url() {
+  local url="${1:-}"
+  printf '%s' "${url}" | sed -E 's#^[A-Za-z]+://([^/:]+).*#\1#'
+}
+
+resolve_ipv4_for_host() {
+  local host="${1:-}"
+  local ip=""
+  if command -v getent >/dev/null 2>&1; then
+    ip="$(getent ahostsv4 "${host}" 2>/dev/null | awk 'NR==1{print $1}')"
+  fi
+  if [[ -z "${ip}" && -x /usr/bin/getent ]]; then
+    ip="$(/usr/bin/getent ahostsv4 "${host}" 2>/dev/null | awk 'NR==1{print $1}')"
+  fi
+  if [[ -z "${ip}" && "$(command -v dig >/dev/null 2>&1; echo $?)" -eq 0 ]]; then
+    ip="$(dig +short "${host}" A | head -n 1)"
+  fi
+  printf '%s' "${ip}"
+}
+
 usage() {
   cat <<EOF
 Usage:
@@ -130,6 +150,19 @@ if [[ -z "${CONTROL_PLANE_BASE_URL}" || -z "${CONTROL_PLANE_SHARED_KEY}" ]]; the
   exit 1
 fi
 
+DOCKER_DNS_1="${DOCKER_DNS_1:-1.1.1.1}"
+DOCKER_DNS_2="${DOCKER_DNS_2:-8.8.8.8}"
+CONTROL_PLANE_DNS_HOST="$(extract_host_from_url "${CONTROL_PLANE_BASE_URL}")"
+CONTROL_PLANE_DNS_IP="$(resolve_ipv4_for_host "${CONTROL_PLANE_DNS_HOST}")"
+if [[ -z "${CONTROL_PLANE_DNS_HOST}" || "${CONTROL_PLANE_DNS_HOST}" == "${CONTROL_PLANE_BASE_URL}" ]]; then
+  echo "Failed to parse host from CONTROL_PLANE_BASE_URL: ${CONTROL_PLANE_BASE_URL}"
+  exit 1
+fi
+if [[ -z "${CONTROL_PLANE_DNS_IP}" ]]; then
+  echo "Failed to resolve control-plane host: ${CONTROL_PLANE_DNS_HOST}"
+  exit 1
+fi
+
 echo "[1/7] Installing runtime dependencies..."
 apt-get update -y
 apt-get install -y ca-certificates curl openssl tar
@@ -184,6 +217,11 @@ services:
     image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${API_IMAGE:-bbexchange-api}:${IMAGE_TAG:-latest}
     container_name: bbexchange-api
     restart: unless-stopped
+    dns:
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
+    extra_hosts:
+      - "${CONTROL_PLANE_DNS_HOST:-license.invalid}:${CONTROL_PLANE_DNS_IP:-127.0.0.1}"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3000
@@ -219,6 +257,11 @@ services:
     image: ${IMAGE_REGISTRY:-ghcr.io/wd9337812}/${WORKER_IMAGE:-bbexchange-worker}:${IMAGE_TAG:-latest}
     container_name: bbexchange-worker
     restart: unless-stopped
+    dns:
+      - ${DOCKER_DNS_1:-1.1.1.1}
+      - ${DOCKER_DNS_2:-8.8.8.8}
+    extra_hosts:
+      - "${CONTROL_PLANE_DNS_HOST:-license.invalid}:${CONTROL_PLANE_DNS_IP:-127.0.0.1}"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - TZ=${TZ:-Asia/Shanghai}
@@ -617,6 +660,10 @@ APP_SERVER_MODE=user
 CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL}
 CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY}
 CONTROL_PLANE_TIMEOUT_MS=8000
+CONTROL_PLANE_DNS_HOST=${CONTROL_PLANE_DNS_HOST}
+CONTROL_PLANE_DNS_IP=${CONTROL_PLANE_DNS_IP}
+DOCKER_DNS_1=${DOCKER_DNS_1}
+DOCKER_DNS_2=${DOCKER_DNS_2}
 IMAGE_REGISTRY=${IMAGE_REGISTRY}
 API_IMAGE=${API_IMAGE}
 WORKER_IMAGE=${WORKER_IMAGE}
@@ -679,6 +726,10 @@ ensure_env_var "APP_SERVER_MODE" "user"
 ensure_env_var "CONTROL_PLANE_BASE_URL" "${CONTROL_PLANE_BASE_URL}"
 ensure_env_var "CONTROL_PLANE_SHARED_KEY" "${CONTROL_PLANE_SHARED_KEY}"
 ensure_env_var "CONTROL_PLANE_TIMEOUT_MS" "8000"
+ensure_env_var "CONTROL_PLANE_DNS_HOST" "${CONTROL_PLANE_DNS_HOST}"
+ensure_env_var "CONTROL_PLANE_DNS_IP" "${CONTROL_PLANE_DNS_IP}"
+ensure_env_var "DOCKER_DNS_1" "${DOCKER_DNS_1}"
+ensure_env_var "DOCKER_DNS_2" "${DOCKER_DNS_2}"
 ensure_env_var "SELF_UPDATE_ENABLED" "false"
 ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
 ensure_env_var "SELF_UPDATE_REPO_DIR" "/workspace"
