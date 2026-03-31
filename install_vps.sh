@@ -487,7 +487,7 @@ get_env_var() {
 }
 
 require_control_plane_for_user_mode() {
-  local mode cp_url cp_key tenant_code
+  local mode cp_url cp_key tenant_code cp_host cp_ip
   mode="$(get_env_var APP_SERVER_MODE)"
   mode="${mode:-user}"
   if [[ "${mode}" != "user" ]]; then
@@ -515,6 +515,19 @@ require_control_plane_for_user_mode() {
     -H "X-Control-Plane-Key: ${cp_key}" \
     -H "X-Tenant-Code: ${tenant_code}" \
     "${probe_url}" || true)"
+  if [[ "${code}" != "200" ]]; then
+    cp_host="$(get_env_var CONTROL_PLANE_DNS_HOST)"
+    cp_host="${cp_host:-$(extract_host_from_url "${cp_url}")}"
+    cp_ip="$(get_env_var CONTROL_PLANE_DNS_IP)"
+    if [[ -n "${cp_host}" && -n "${cp_ip}" ]]; then
+      echo "[update] probe retry with pinned resolve: ${cp_host} -> ${cp_ip}"
+      code="$(curl -sS -m 12 -o "${body}" -w "%{http_code}" \
+        --resolve "${cp_host}:443:${cp_ip}" \
+        -H "X-Control-Plane-Key: ${cp_key}" \
+        -H "X-Tenant-Code: ${tenant_code}" \
+        "${probe_url}" || true)"
+    fi
+  fi
   if [[ "${code}" != "200" ]]; then
     echo "[update] ERROR: control plane probe failed, code=${code}, url=${probe_url}"
     echo "[update] response: $(head -c 300 "${body}" 2>/dev/null || true)"
@@ -791,6 +804,14 @@ PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
   -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
   -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
   "${PROBE_URL}" || true)"
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "[install] probe retry with pinned resolve: ${CONTROL_PLANE_DNS_HOST} -> ${CONTROL_PLANE_DNS_IP}"
+  PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+    --resolve "${CONTROL_PLANE_DNS_HOST}:443:${CONTROL_PLANE_DNS_IP}" \
+    -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+    -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+    "${PROBE_URL}" || true)"
+fi
 if [[ "${PROBE_CODE}" != "200" ]]; then
   echo "Control-plane probe failed (code=${PROBE_CODE}): ${PROBE_URL}"
   echo "Response: $(head -c 300 "${PROBE_BODY}" 2>/dev/null || true)"
