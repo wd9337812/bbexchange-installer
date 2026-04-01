@@ -7,11 +7,12 @@ ENV_FILE="${ENV_FILE:-.env.prod}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LAST_TAG_FILE="${REPO_DIR}/apps/backend/data/last_good_image_tag.txt"
 INSTALLER_RAW_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
+CHANNEL_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/BBexchange/codex/phase1-task-crud/release-channel"
 REQUIRED_FREE_GB="${REQUIRED_FREE_GB:-6}"
 REQUIRED_FREE_INODE_PERCENT="${REQUIRED_FREE_INODE_PERCENT:-10}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
-REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-true}"
+REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-false}"
 
 cd "${REPO_DIR}"
 
@@ -311,8 +312,29 @@ self_update_ops_assets() {
 
 self_update_ops_assets
 
+resolve_target_tag_from_channel() {
+  local channel_base channel_name channel_url resolved
+  channel_base="$(sed -n 's/^SELF_UPDATE_CHANNEL_BASE=//p' "${ENV_FILE}" | head -n 1)"
+  channel_name="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL=//p' "${ENV_FILE}" | head -n 1)"
+  channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
+  channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
+  channel_name="${channel_name:-stable}"
+  if [[ -z "${channel_url}" ]]; then
+    channel_url="${channel_base%/}/${channel_name}"
+  fi
+  resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+  if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    TARGET_TAG="${resolved}"
+    echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
+    return 0
+  fi
+  return 1
+}
+
 if [[ -z "${TARGET_TAG}" ]]; then
-  TARGET_TAG="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_TAG=//p' "${ENV_FILE}" | head -n 1)"
+  if ! resolve_target_tag_from_channel; then
+    TARGET_TAG="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_TAG=//p' "${ENV_FILE}" | head -n 1)"
+  fi
   TARGET_TAG="${TARGET_TAG:-latest}"
 fi
 
@@ -352,6 +374,12 @@ if grep -q '^IMAGE_TAG=' "${ENV_FILE}"; then
   sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${TARGET_TAG}/" "${ENV_FILE}"
 else
   echo "IMAGE_TAG=${TARGET_TAG}" >> "${ENV_FILE}"
+fi
+write_env_stamp="${TARGET_TAG}-$(date +%s)"
+if grep -q '^FRONTEND_BUILD_ID=' "${ENV_FILE}"; then
+  sed -i "s/^FRONTEND_BUILD_ID=.*/FRONTEND_BUILD_ID=${write_env_stamp}/" "${ENV_FILE}"
+else
+  echo "FRONTEND_BUILD_ID=${write_env_stamp}" >> "${ENV_FILE}"
 fi
 
 echo "[update] pull images: ${TARGET_TAG}"

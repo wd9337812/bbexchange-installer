@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -11,7 +11,9 @@ IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/wd9337812}"
 API_IMAGE="${API_IMAGE:-bbexchange-api}"
 WORKER_IMAGE="${WORKER_IMAGE:-bbexchange-worker}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-UPDATE_CHANNEL_TAG="${UPDATE_CHANNEL_TAG:-latest}"
+UPDATE_CHANNEL_TAG="${UPDATE_CHANNEL_TAG:-}"
+UPDATE_CHANNEL_NAME="${UPDATE_CHANNEL_NAME:-stable}"
+UPDATE_CHANNEL_BASE="${UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/BBexchange/codex/phase1-task-crud/release-channel}"
 SSL_MODE="${SSL_MODE:-auto}"
 DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
@@ -55,7 +57,9 @@ Options:
   --api-image <name>           API image name (default: ${API_IMAGE})
   --worker-image <name>        Worker image name (default: ${WORKER_IMAGE})
   --image-tag <tag>            Deploy image tag (default: ${IMAGE_TAG})
-  --update-channel-tag <tag>   Update check channel tag (default: ${UPDATE_CHANNEL_TAG})
+  --update-channel-tag <tag>   Update check channel tag (default: auto from channel)
+  --update-channel-name <name>  Update channel name (default: ${UPDATE_CHANNEL_NAME})
+  --update-channel-base <url>   Update channel base url (default: ${UPDATE_CHANNEL_BASE})
   --ssl <on|off|auto>          SSL mode (default: ${SSL_MODE})
   --domain <domain>            Domain for SSL mode
   --email <email>              Let's Encrypt email
@@ -77,6 +81,8 @@ while [[ $# -gt 0 ]]; do
     --worker-image) WORKER_IMAGE="$2"; shift 2 ;;
     --image-tag) IMAGE_TAG="$2"; shift 2 ;;
     --update-channel-tag) UPDATE_CHANNEL_TAG="$2"; shift 2 ;;
+    --update-channel-name) UPDATE_CHANNEL_NAME="$2"; shift 2 ;;
+    --update-channel-base) UPDATE_CHANNEL_BASE="$2"; shift 2 ;;
     --ssl) SSL_MODE="$2"; shift 2 ;;
     --domain) DOMAIN="$2"; shift 2 ;;
     --email) EMAIL="$2"; shift 2 ;;
@@ -91,6 +97,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
+  UPDATE_CHANNEL_TAG="$(curl -fsSL --max-time 10 "${UPDATE_CHANNEL_BASE%/}/${UPDATE_CHANNEL_NAME}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+fi
+if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
+  UPDATE_CHANNEL_TAG="latest"
+fi
 SSL_MODE="$(to_lower "${SSL_MODE}")"
 ENABLE_BROWSER="$(to_lower "${ENABLE_BROWSER}")"
 STORAGE_MODE="$(to_lower "${STORAGE_MODE}")"
@@ -243,7 +255,10 @@ services:
       - SELF_UPDATE_REPO_DIR=${SELF_UPDATE_REPO_DIR:-/workspace}
       - SELF_UPDATE_HOST_REPO_DIR=${SELF_UPDATE_HOST_REPO_DIR:-/opt/brandbidding}
       - SELF_UPDATE_IMAGE_COMPOSE_FILE=${SELF_UPDATE_IMAGE_COMPOSE_FILE:-deploy/docker-compose.image.yml}
+      - SELF_UPDATE_CHANNEL_BASE=${SELF_UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/BBexchange/codex/phase1-task-crud/release-channel}
+      - SELF_UPDATE_IMAGE_CHANNEL=${SELF_UPDATE_IMAGE_CHANNEL:-stable}
       - SELF_UPDATE_IMAGE_CHANNEL_TAG=${SELF_UPDATE_IMAGE_CHANNEL_TAG:-latest}
+      - SELF_UPDATE_IMAGE_CHANNEL_URL=${SELF_UPDATE_IMAGE_CHANNEL_URL:-}
       - SELF_UPDATE_HELPER_IMAGE=${SELF_UPDATE_HELPER_IMAGE:-docker:27-cli}
     volumes:
       - ../apps/backend/data:/app/apps/backend/data
@@ -686,7 +701,10 @@ SELF_UPDATE_MODE=manual_image_ops
 SELF_UPDATE_REPO_DIR=/workspace
 SELF_UPDATE_HOST_REPO_DIR=${TARGET_DIR}
 SELF_UPDATE_IMAGE_COMPOSE_FILE=deploy/docker-compose.image.yml
+SELF_UPDATE_CHANNEL_BASE=${UPDATE_CHANNEL_BASE}
+SELF_UPDATE_IMAGE_CHANNEL=${UPDATE_CHANNEL_NAME}
 SELF_UPDATE_IMAGE_CHANNEL_TAG=${UPDATE_CHANNEL_TAG}
+SELF_UPDATE_IMAGE_CHANNEL_URL=
 SELF_UPDATE_HELPER_IMAGE=docker:27-cli
 SELF_UPDATE_INSTALLER_RAW_BASE=https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main
 EOF
@@ -748,7 +766,10 @@ ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
 ensure_env_var "SELF_UPDATE_REPO_DIR" "/workspace"
 ensure_env_var "SELF_UPDATE_HOST_REPO_DIR" "${TARGET_DIR}"
 ensure_env_var "SELF_UPDATE_IMAGE_COMPOSE_FILE" "deploy/docker-compose.image.yml"
+ensure_env_var "SELF_UPDATE_CHANNEL_BASE" "${UPDATE_CHANNEL_BASE}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL" "${UPDATE_CHANNEL_NAME}"
 ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_TAG" "${UPDATE_CHANNEL_TAG}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_URL" ""
 ensure_env_var "SELF_UPDATE_HELPER_IMAGE" "docker:27-cli"
 ensure_env_var "SELF_UPDATE_INSTALLER_RAW_BASE" "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
 ensure_secret_var "AUTH_SECRET"

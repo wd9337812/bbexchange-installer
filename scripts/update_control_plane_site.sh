@@ -16,8 +16,9 @@ REQUIRED_FREE_GB="${REQUIRED_FREE_GB:-4}"
 REQUIRED_FREE_INODE_PERCENT="${REQUIRED_FREE_INODE_PERCENT:-10}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
-REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-true}"
+REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-false}"
 INSTALLER_RAW_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
+CHANNEL_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/BBexchange/codex/phase1-task-crud/release-channel"
 
 read_env() {
   local key="$1"
@@ -181,6 +182,25 @@ print_runtime_summary() {
   echo "[summary] api_admin pulled_digest=${digest:-unknown}"
 }
 
+resolve_target_tag_from_channel() {
+  local channel_base channel_name channel_url resolved
+  channel_base="$(read_env "SELF_UPDATE_CHANNEL_BASE" "${ENV_FILE}")"
+  channel_name="$(read_env "SELF_UPDATE_IMAGE_CHANNEL" "${ENV_FILE}")"
+  channel_url="$(read_env "SELF_UPDATE_IMAGE_CHANNEL_URL" "${ENV_FILE}")"
+  channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
+  channel_name="${channel_name:-stable}"
+  if [[ -z "${channel_url}" ]]; then
+    channel_url="${channel_base%/}/${channel_name}"
+  fi
+  resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+  if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    TARGET_TAG="${resolved}"
+    echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
+    return 0
+  fi
+  return 1
+}
+
 cd "${INSTALL_DIR}"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -195,7 +215,10 @@ self_update_ops_assets "${INSTALLER_RAW_BASE}"
 CURRENT_TAG="$(read_env "IMAGE_TAG" "${ENV_FILE}")"
 CURRENT_TAG="${CURRENT_TAG:-latest}"
 if [[ -z "${TARGET_TAG}" ]]; then
-  TARGET_TAG="${CURRENT_TAG}"
+  if ! resolve_target_tag_from_channel; then
+    TARGET_TAG="$(read_env "SELF_UPDATE_IMAGE_CHANNEL_TAG" "${ENV_FILE}")"
+  fi
+  TARGET_TAG="${TARGET_TAG:-${CURRENT_TAG}}"
 fi
 
 IMAGE_REGISTRY="$(read_env "IMAGE_REGISTRY" "${ENV_FILE}")"
