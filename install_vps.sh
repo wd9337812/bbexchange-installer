@@ -13,7 +13,7 @@ WORKER_IMAGE="${WORKER_IMAGE:-bbexchange-worker}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
 UPDATE_CHANNEL_TAG="${UPDATE_CHANNEL_TAG:-}"
 UPDATE_CHANNEL_NAME="${UPDATE_CHANNEL_NAME:-stable}"
-UPDATE_CHANNEL_BASE="${UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/BBexchange/codex/phase1-task-crud/release-channel}"
+UPDATE_CHANNEL_BASE="${UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel}"
 SSL_MODE="${SSL_MODE:-auto}"
 DOMAIN="${DOMAIN:-}"
 EMAIL="${EMAIL:-}"
@@ -255,7 +255,7 @@ services:
       - SELF_UPDATE_REPO_DIR=${SELF_UPDATE_REPO_DIR:-/workspace}
       - SELF_UPDATE_HOST_REPO_DIR=${SELF_UPDATE_HOST_REPO_DIR:-/opt/brandbidding}
       - SELF_UPDATE_IMAGE_COMPOSE_FILE=${SELF_UPDATE_IMAGE_COMPOSE_FILE:-deploy/docker-compose.image.yml}
-      - SELF_UPDATE_CHANNEL_BASE=${SELF_UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/BBexchange/codex/phase1-task-crud/release-channel}
+      - SELF_UPDATE_CHANNEL_BASE=${SELF_UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel}
       - SELF_UPDATE_IMAGE_CHANNEL=${SELF_UPDATE_IMAGE_CHANNEL:-stable}
       - SELF_UPDATE_IMAGE_CHANNEL_TAG=${SELF_UPDATE_IMAGE_CHANNEL_TAG:-latest}
       - SELF_UPDATE_IMAGE_CHANNEL_URL=${SELF_UPDATE_IMAGE_CHANNEL_URL:-}

@@ -18,7 +18,7 @@ AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-false}"
 INSTALLER_RAW_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
-CHANNEL_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/BBexchange/codex/phase1-task-crud/release-channel"
+CHANNEL_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel"
 
 read_env() {
   local key="$1"
