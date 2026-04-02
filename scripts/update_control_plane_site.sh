@@ -9,7 +9,7 @@ fi
 INSTALL_DIR="${INSTALL_DIR:-/opt/bbauto-control-plane}"
 ENV_FILE="${ENV_FILE:-.env.admin.prod}"
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.admin.image.yml}"
-TARGET_TAG="${1:-}"
+TARGET_TAG="${TARGET_TAG:-}"
 LAST_TAG_FILE_REL="apps/backend/data/last_good_admin_image_tag.txt"
 LAST_TAG_FILE="${INSTALL_DIR}/${LAST_TAG_FILE_REL}"
 REQUIRED_FREE_GB="${REQUIRED_FREE_GB:-4}"
@@ -19,6 +19,27 @@ DRY_RUN="${DRY_RUN:-false}"
 REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-false}"
 INSTALLER_RAW_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
 CHANNEL_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel"
+
+parse_cli_args() {
+  # New style:
+  #   bash scripts/update_control_plane_site.sh [tag]
+  # Legacy style:
+  #   bash scripts/update_control_plane_site.sh <compose_file> <env_file> [tag]
+  if [[ "$#" -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ "$#" -ge 2 && ( "$1" == *.yml || "$1" == *.yaml || "$1" == deploy/* ) ]]; then
+    COMPOSE_FILE="$1"
+    ENV_FILE="$2"
+    TARGET_TAG="${3:-${TARGET_TAG}}"
+    return 0
+  fi
+
+  TARGET_TAG="$1"
+}
+
+parse_cli_args "$@"
 
 read_env() {
   local key="$1"
@@ -149,10 +170,11 @@ self_update_ops_assets() {
   fetch_one "deploy/docker-compose.admin.image.yml"
   fetch_one "scripts/db_migrate.sh"
   fetch_one "scripts/db_backup.sh"
+  fetch_one "scripts/clear_control_plane_billing.sh"
   fetch_one "scripts/bootstrap_btcpay_payment_settings.sh"
   fetch_one "scripts/update_control_plane_site.sh"
   rm -f "${tmp}" >/dev/null 2>&1 || true
-  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/bootstrap_btcpay_payment_settings.sh scripts/update_control_plane_site.sh >/dev/null 2>&1 || true
+  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/clear_control_plane_billing.sh scripts/bootstrap_btcpay_payment_settings.sh scripts/update_control_plane_site.sh >/dev/null 2>&1 || true
 }
 
 rollback() {

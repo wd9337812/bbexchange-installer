@@ -36,6 +36,18 @@ set_env_var() {
   fi
 }
 
+safe_tenant_name() {
+  local raw="${1:-}"
+  local cleaned
+  cleaned="$(printf '%s' "${raw}" | tr -cd 'A-Za-z0-9._-')"
+  cleaned="${cleaned#[-_.]}"
+  cleaned="${cleaned%% }"
+  if [[ -z "${cleaned}" ]]; then
+    cleaned="tenant-host"
+  fi
+  printf '%s' "${cleaned}"
+}
+
 extract_host_from_url() {
   local url="${1:-}"
   printf '%s' "${url}" | sed -E 's#^[A-Za-z]+://([^/:]+).*#\1#'
@@ -102,7 +114,7 @@ require_control_plane_for_user_mode() {
   fi
 
   if [[ -z "${tenant_code}" ]]; then
-    host_hint="$(hostname 2>/dev/null || echo tenant)"
+    host_hint="$(safe_tenant_name "$(hostname 2>/dev/null || echo tenant)")"
     body="$(curl -sS -m 15 -X POST "${cp_url%/}/api/internal/tenant/register" \
       -H "Content-Type: application/json" \
       -H "X-Control-Plane-Key: ${cp_key}" \
