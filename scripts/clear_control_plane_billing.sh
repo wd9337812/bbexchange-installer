@@ -3,7 +3,7 @@ set -euo pipefail
 
 COMPOSE_FILE="${1:-deploy/docker-compose.admin.image.yml}"
 ENV_FILE="${2:-.env.admin.prod}"
-TENANT_CODE="${3:-}"
+CLI_TENANT_CODE="${3:-}"
 MODE="${MODE:-dry-run}" # dry-run | apply
 
 if [[ ! -f "${ENV_FILE}" ]]; then
@@ -26,13 +26,13 @@ POSTGRES_DB="${POSTGRES_DB:-bbexchange}"
 TENANT_SQL_FILTER=""
 TENANT_NOTE="ALL"
 
-if [[ -n "${TENANT_CODE}" ]]; then
-  if ! [[ "${TENANT_CODE}" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "[clear-billing] invalid TENANT_CODE: ${TENANT_CODE}"
+if [[ -n "${CLI_TENANT_CODE}" ]]; then
+  if ! [[ "${CLI_TENANT_CODE}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "[clear-billing] invalid TENANT_CODE: ${CLI_TENANT_CODE}"
     exit 1
   fi
-  TENANT_NOTE="${TENANT_CODE}"
-  TENANT_SQL_FILTER="where tenant_id in (select id from billing_tenants where tenant_code='${TENANT_CODE}')"
+  TENANT_NOTE="${CLI_TENANT_CODE}"
+  TENANT_SQL_FILTER="where tenant_id in (select id from billing_tenants where tenant_code='${CLI_TENANT_CODE}')"
 fi
 
 echo "[clear-billing] mode=${MODE} tenant=${TENANT_NOTE}"
