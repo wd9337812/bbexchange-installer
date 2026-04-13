@@ -13,6 +13,7 @@ REQUIRED_FREE_INODE_PERCENT="${REQUIRED_FREE_INODE_PERCENT:-10}"
 AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-false}"
+CHANNEL_NAME_OVERRIDE=""
 
 cd "${REPO_DIR}"
 
@@ -324,13 +325,22 @@ self_update_ops_assets() {
 
 self_update_ops_assets
 
+if [[ -n "${TARGET_TAG}" && "${TARGET_TAG}" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; then
+  case "${TARGET_TAG}" in
+    stable|beta|nightly)
+      CHANNEL_NAME_OVERRIDE="${TARGET_TAG}"
+      TARGET_TAG=""
+      ;;
+  esac
+fi
+
 resolve_target_tag_from_channel() {
   local channel_base channel_name channel_url resolved
   channel_base="$(sed -n 's/^SELF_UPDATE_CHANNEL_BASE=//p' "${ENV_FILE}" | head -n 1)"
   channel_name="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL=//p' "${ENV_FILE}" | head -n 1)"
   channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
   channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
-  channel_name="${channel_name:-stable}"
+  channel_name="${CHANNEL_NAME_OVERRIDE:-${channel_name:-stable}}"
   if [[ -z "${channel_url}" ]]; then
     channel_url="${channel_base%/}/${channel_name}"
   fi

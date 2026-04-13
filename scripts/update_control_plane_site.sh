@@ -19,6 +19,7 @@ DRY_RUN="${DRY_RUN:-false}"
 REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-false}"
 INSTALLER_RAW_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
 CHANNEL_BASE_DEFAULT="https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel"
+CHANNEL_NAME_OVERRIDE=""
 
 parse_cli_args() {
   # New style:
@@ -40,6 +41,15 @@ parse_cli_args() {
 }
 
 parse_cli_args "$@"
+
+if [[ -n "${TARGET_TAG}" && "${TARGET_TAG}" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; then
+  case "${TARGET_TAG}" in
+    stable|beta|nightly)
+      CHANNEL_NAME_OVERRIDE="${TARGET_TAG}"
+      TARGET_TAG=""
+      ;;
+  esac
+fi
 
 read_env() {
   local key="$1"
@@ -210,7 +220,7 @@ resolve_target_tag_from_channel() {
   channel_name="$(read_env "SELF_UPDATE_IMAGE_CHANNEL" "${ENV_FILE}")"
   channel_url="$(read_env "SELF_UPDATE_IMAGE_CHANNEL_URL" "${ENV_FILE}")"
   channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
-  channel_name="${channel_name:-stable}"
+  channel_name="${CHANNEL_NAME_OVERRIDE:-${channel_name:-stable}}"
   if [[ -z "${channel_url}" ]]; then
     channel_url="${channel_base%/}/${channel_name}"
   fi
