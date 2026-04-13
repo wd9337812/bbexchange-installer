@@ -318,9 +318,11 @@ self_update_ops_assets() {
   fetch_one "scripts/db_backup.sh"
   fetch_one "scripts/rollback_image.sh"
   fetch_one "scripts/update_image.sh"
+  fetch_one "scripts/rebuild_affiliate_conversions_from_api.js"
+  fetch_one "scripts/rebuild_affiliate_conversions_from_api.sh"
 
   rm -f "${tmp}" >/dev/null 2>&1 || true
-  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/rollback_image.sh scripts/update_image.sh >/dev/null 2>&1 || true
+  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/rollback_image.sh scripts/update_image.sh scripts/rebuild_affiliate_conversions_from_api.sh >/dev/null 2>&1 || true
 }
 
 self_update_ops_assets
