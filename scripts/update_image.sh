@@ -420,7 +420,7 @@ else
 fi
 
 echo "[update] pull images: ${TARGET_TAG}"
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" pull api worker
+IMAGE_TAG="${TARGET_TAG}" docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" pull api worker
 
 after_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 after_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
@@ -439,7 +439,7 @@ echo "[update] migrate schema from image: ${API_IMAGE_REF}"
 SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[update] restart services"
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api worker caddy
+IMAGE_TAG="${TARGET_TAG}" docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api worker caddy
 
 echo "[update] health check"
 health_ok=0
