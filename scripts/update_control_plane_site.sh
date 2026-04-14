@@ -221,9 +221,17 @@ resolve_target_tag_from_channel() {
   channel_url="$(read_env "SELF_UPDATE_IMAGE_CHANNEL_URL" "${ENV_FILE}")"
   channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
   channel_name="${CHANNEL_NAME_OVERRIDE:-${channel_name:-stable}}"
+  # For channel aliases (stable/beta/nightly), always resolve by base+name.
+  # This avoids stale fixed URL leftovers blocking channel pointer updates.
+  case "${channel_name}" in
+    stable|beta|nightly)
+      channel_url=""
+      ;;
+  esac
   if [[ -z "${channel_url}" ]]; then
     channel_url="${channel_base%/}/${channel_name}"
   fi
+  echo "[update] resolving channel url: ${channel_url}" >&2
   resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
   if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     TARGET_TAG="${resolved}"
