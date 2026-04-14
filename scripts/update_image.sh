@@ -14,6 +14,7 @@ AUTO_CLEANUP="${AUTO_CLEANUP:-true}"
 DRY_RUN="${DRY_RUN:-false}"
 REQUIRE_NEW_IMAGE="${REQUIRE_NEW_IMAGE:-false}"
 CHANNEL_NAME_OVERRIDE=""
+ALLOW_STALE_CHANNEL_FALLBACK="${ALLOW_STALE_CHANNEL_FALLBACK:-false}"
 
 cd "${REPO_DIR}"
 
@@ -318,11 +319,9 @@ self_update_ops_assets() {
   fetch_one "scripts/db_backup.sh"
   fetch_one "scripts/rollback_image.sh"
   fetch_one "scripts/update_image.sh"
-  fetch_one "scripts/rebuild_affiliate_conversions_from_api.js"
-  fetch_one "scripts/rebuild_affiliate_conversions_from_api.sh"
 
   rm -f "${tmp}" >/dev/null 2>&1 || true
-  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/rollback_image.sh scripts/update_image.sh scripts/rebuild_affiliate_conversions_from_api.sh >/dev/null 2>&1 || true
+  chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/rollback_image.sh scripts/update_image.sh >/dev/null 2>&1 || true
 }
 
 self_update_ops_assets
@@ -343,29 +342,35 @@ resolve_target_tag_from_channel() {
   channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
   channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
   channel_name="${CHANNEL_NAME_OVERRIDE:-${channel_name:-stable}}"
-  # For channel aliases (stable/beta/nightly), always resolve by base+name.
-  # This avoids stale fixed URL leftovers blocking channel pointer updates.
-  case "${channel_name}" in
-    stable|beta|nightly)
-      channel_url=""
-      ;;
-  esac
+  if [[ "${channel_base}" == *"/BBexchange/"* ]]; then
+    echo "[update] WARN: SELF_UPDATE_CHANNEL_BASE points to BBexchange (${channel_base})."
+    echo "[update] WARN: if BBexchange is private, other users may not fetch release channel."
+  fi
   if [[ -z "${channel_url}" ]]; then
     channel_url="${channel_base%/}/${channel_name}"
   fi
-  echo "[update] resolving channel url: ${channel_url}" >&2
+  echo "[update] resolving channel url: ${channel_url}"
   resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
   if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     TARGET_TAG="${resolved}"
     echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
     return 0
   fi
+  echo "[update] ERROR: failed to resolve channel tag from ${channel_url}"
   return 1
 }
 
 if [[ -z "${TARGET_TAG}" ]]; then
   if ! resolve_target_tag_from_channel; then
-    TARGET_TAG="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_TAG=//p' "${ENV_FILE}" | head -n 1)"
+    fallback_tag="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_TAG=//p' "${ENV_FILE}" | head -n 1)"
+    if bool_true "${ALLOW_STALE_CHANNEL_FALLBACK}" && [[ -n "${fallback_tag}" ]]; then
+      TARGET_TAG="${fallback_tag}"
+      echo "[update] WARN: using stale fallback tag from SELF_UPDATE_IMAGE_CHANNEL_TAG=${TARGET_TAG}"
+    else
+      echo "[update] ERROR: channel resolve failed; refuse to use stale fallback."
+      echo "[update] hint: set ALLOW_STALE_CHANNEL_FALLBACK=true to force fallback, or pass explicit tag."
+      exit 12
+    fi
   fi
   TARGET_TAG="${TARGET_TAG:-latest}"
 fi
@@ -437,7 +442,22 @@ echo "[update] restart services"
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api worker caddy
 
 echo "[update] health check"
-curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null
+health_ok=0
+for i in 1 2 3 4 5; do
+  if curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null 2>&1; then
+    health_ok=1
+    break
+  fi
+  if curl -fsS --max-time 10 http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
+    health_ok=1
+    break
+  fi
+  sleep 2
+done
+if [[ "${health_ok}" -ne 1 ]]; then
+  echo "[update] ERROR: health check failed after retries."
+  exit 33
+fi
 
 echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
 api_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q api 2>/dev/null || true)"
