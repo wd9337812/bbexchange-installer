@@ -98,7 +98,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
-  UPDATE_CHANNEL_TAG="$(curl -fsSL --max-time 10 "${UPDATE_CHANNEL_BASE%/}/${UPDATE_CHANNEL_NAME}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+  UPDATE_CHANNEL_TAG="$(curl -fsSL --max-time 10 "${UPDATE_CHANNEL_BASE%/}/${UPDATE_CHANNEL_NAME}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
 fi
 if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
   UPDATE_CHANNEL_TAG="latest"

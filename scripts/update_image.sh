@@ -350,7 +350,7 @@ resolve_target_tag_from_channel() {
     channel_url="${channel_base%/}/${channel_name}"
   fi
   echo "[update] resolving channel url: ${channel_url}"
-  resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
+  resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
   if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     TARGET_TAG="${resolved}"
     echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
