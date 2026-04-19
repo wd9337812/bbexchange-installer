@@ -1,6 +1,5 @@
-﻿{
-    "channel":  "stable",
-    "tag":  "sha-e786fd67af",
-    "updatedAt":  "2026-04-19T15:43:46Z"
+{
+  "channel": "stable",
+  "tag": "sha-e786fd67af",
+  "updatedAt": "2026-04-19T15:45:00Z"
 }
-
