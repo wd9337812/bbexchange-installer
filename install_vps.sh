@@ -23,7 +23,7 @@ REGISTRY_USER="${REGISTRY_USER:-}"
 REGISTRY_TOKEN="${REGISTRY_TOKEN:-}"
 CONTROL_PLANE_BASE_URL="${CONTROL_PLANE_BASE_URL:-https://license.bbauto.top}"
 # Default shared key for user-side installer. Can still be overridden by --control-plane-key.
-CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-${BBAUTO_CONTROL_PLANE_SHARED_KEY:-bbauto-shared-key}}"
+CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-${BBAUTO_CONTROL_PLANE_SHARED_KEY:-5854108fc0c998e0eb08ddca706036bb91e289986abd055d300871582f41f014}}"
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
