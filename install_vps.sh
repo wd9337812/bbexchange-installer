@@ -98,8 +98,30 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+resolve_update_channel_tag() {
+  local channel_base channel_name json_url text_url raw_json parsed raw_text
+  channel_base="${UPDATE_CHANNEL_BASE%/}"
+  channel_name="${UPDATE_CHANNEL_NAME}"
+  json_url="${channel_base}/${channel_name}.json"
+  text_url="${channel_base}/${channel_name}"
+  raw_json="$(curl -fsSL --max-time 10 "${json_url}" 2>/dev/null || true)"
+  if [[ -n "${raw_json}" ]]; then
+    parsed="$(printf '%s' "${raw_json}" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' | head -n 1)"
+    if [[ "${parsed}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+      echo "${parsed}"
+      return 0
+    fi
+  fi
+  raw_text="$(curl -fsSL --max-time 10 "${text_url}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
+  if [[ "${raw_text}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    echo "${raw_text}"
+    return 0
+  fi
+  return 1
+}
+
 if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
-  UPDATE_CHANNEL_TAG="$(curl -fsSL --max-time 10 "${UPDATE_CHANNEL_BASE%/}/${UPDATE_CHANNEL_NAME}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
+  UPDATE_CHANNEL_TAG="$(resolve_update_channel_tag || true)"
 fi
 if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
   UPDATE_CHANNEL_TAG="latest"

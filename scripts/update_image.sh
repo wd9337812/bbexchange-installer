@@ -384,7 +384,7 @@ if [[ -n "${TARGET_TAG}" && "${TARGET_TAG}" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; the
 fi
 
 resolve_target_tag_from_channel() {
-  local channel_base channel_name channel_url resolved
+  local channel_base channel_name channel_url channel_json_url resolved raw_json parsed_tag
   channel_base="$(sed -n 's/^SELF_UPDATE_CHANNEL_BASE=//p' "${ENV_FILE}" | head -n 1)"
   channel_name="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL=//p' "${ENV_FILE}" | head -n 1)"
   channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
@@ -396,6 +396,22 @@ resolve_target_tag_from_channel() {
   fi
   if [[ -z "${channel_url}" ]]; then
     channel_url="${channel_base%/}/${channel_name}"
+  fi
+  if [[ "${channel_url}" =~ \.json$ ]]; then
+    channel_json_url="${channel_url}"
+    channel_url="${channel_url%.json}"
+  else
+    channel_json_url="${channel_url}.json"
+  fi
+  echo "[update] resolving channel json url: ${channel_json_url}"
+  raw_json="$(curl -fsSL --max-time 10 "${channel_json_url}" 2>/dev/null || true)"
+  if [[ -n "${raw_json}" ]]; then
+    parsed_tag="$(printf '%s' "${raw_json}" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' | head -n 1)"
+    if [[ "${parsed_tag}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+      TARGET_TAG="${parsed_tag}"
+      echo "[update] resolved image tag from channel json (${channel_name}): ${TARGET_TAG}"
+      return 0
+    fi
   fi
   echo "[update] resolving channel url: ${channel_url}"
   resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
