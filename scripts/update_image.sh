@@ -171,6 +171,54 @@ bool_true() {
   [[ "${v}" == "1" || "${v}" == "true" || "${v}" == "yes" || "${v}" == "on" ]]
 }
 
+in_keep_tags() {
+  local tag="$1"
+  shift
+  local keep
+  for keep in "$@"; do
+    [[ "${tag}" == "${keep}" ]] && return 0
+  done
+  return 1
+}
+
+cleanup_old_app_images() {
+  local rollback_tag="$1"
+  local image_repo="$2"
+  local image_name="$3"
+  local keep_tags=("${TARGET_TAG}")
+  local tag
+  local refs=()
+  local removed=0
+
+  if [[ -n "${rollback_tag}" && "${rollback_tag}" != "${TARGET_TAG}" ]]; then
+    keep_tags+=("${rollback_tag}")
+  fi
+
+  while IFS= read -r tag; do
+    [[ -z "${tag}" || "${tag}" == "<none>" ]] && continue
+    if in_keep_tags "${tag}" "${keep_tags[@]}"; then
+      continue
+    fi
+    refs+=("${image_repo}/${image_name}:${tag}")
+  done < <(docker images "${image_repo}/${image_name}" --format '{{.Tag}}' | sort -u)
+
+  if [[ "${#refs[@]}" -eq 0 ]]; then
+    echo "[cleanup] ${image_name}: no old tag to remove (kept: ${keep_tags[*]})"
+    return 0
+  fi
+
+  echo "[cleanup] ${image_name}: keep tags ${keep_tags[*]}, remove old tags ${#refs[@]}"
+  for tag in "${refs[@]}"; do
+    if docker image rm "${tag}" >/dev/null 2>&1; then
+      removed=$((removed + 1))
+      echo "[cleanup] removed ${tag}"
+    else
+      echo "[cleanup] skip ${tag} (possibly in use)"
+    fi
+  done
+  echo "[cleanup] ${image_name}: removed ${removed}/${#refs[@]} old tags"
+}
+
 check_path_capacity() {
   local path="$1"
   local required_kb="$2"
@@ -397,6 +445,7 @@ fi
 
 mkdir -p apps/backend/data
 CURRENT_TAG="$(sed -n 's/^IMAGE_TAG=//p' "${ENV_FILE}" | head -n 1)"
+ROLLBACK_TAG="${CURRENT_TAG:-}"
 if [[ -n "${CURRENT_TAG}" ]]; then
   echo "${CURRENT_TAG}" > "${LAST_TAG_FILE}"
 fi
@@ -460,6 +509,14 @@ if [[ "${health_ok}" -ne 1 ]]; then
 fi
 
 echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
+
+if bool_true "${AUTO_CLEANUP}"; then
+  echo "[cleanup] start image retention (keep current + previous rollback)"
+  cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${API_IMAGE_NAME}"
+  cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${WORKER_IMAGE_NAME}"
+  docker image prune -f >/dev/null 2>&1 || true
+fi
+
 api_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q api 2>/dev/null || true)"
 worker_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q worker 2>/dev/null || true)"
 api_started="$(docker inspect -f '{{.State.StartedAt}}' "${api_cid}" 2>/dev/null || true)"
