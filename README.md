@@ -2,26 +2,28 @@
 
 Public one-command installer repository for BBexchange/BBAuto deployments.
 
-## 1) User instance install (interactive, latest)
+## 1) User instance install (stable channel)
 
 ```bash
-curl -fsSL -o /tmp/install_vps.sh https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/install_vps.sh
-sudo bash /tmp/install_vps.sh
+curl -fsSL https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/install_vps.sh \
+| sed '1s/^\xEF\xBB\xBF//' \
+| sudo bash
 ```
 
-## 2) User instance update (keep original latest behavior)
+## 2) User instance update (stable channel)
 
 In user VPS install directory:
 
 ```bash
 cd /opt/brandbidding
-sudo bash scripts/update_image.sh latest
+sudo bash scripts/update_image.sh
 ```
 
 ## Optional deployment options
 
 ```bash
-sudo bash /tmp/install_vps.sh --image-tag latest --ssl auto --domain example.com
+curl -fsSL -o /tmp/install_vps.sh https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/install_vps.sh
+sudo bash /tmp/install_vps.sh --ssl auto --domain example.com
 ```
 
 Default image namespace: `ghcr.io/wd9337812`.

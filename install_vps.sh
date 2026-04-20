@@ -10,7 +10,7 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/brandbidding}"
 IMAGE_REGISTRY="${IMAGE_REGISTRY:-ghcr.io/wd9337812}"
 API_IMAGE="${API_IMAGE:-bbexchange-api}"
 WORKER_IMAGE="${WORKER_IMAGE:-bbexchange-worker}"
-IMAGE_TAG="${IMAGE_TAG:-latest}"
+IMAGE_TAG="${IMAGE_TAG:-}"
 UPDATE_CHANNEL_TAG="${UPDATE_CHANNEL_TAG:-}"
 UPDATE_CHANNEL_NAME="${UPDATE_CHANNEL_NAME:-stable}"
 UPDATE_CHANNEL_BASE="${UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel}"
@@ -21,8 +21,9 @@ ENABLE_BROWSER="${ENABLE_BROWSER:-true}"
 STORAGE_MODE="${STORAGE_MODE:-postgres}"
 REGISTRY_USER="${REGISTRY_USER:-}"
 REGISTRY_TOKEN="${REGISTRY_TOKEN:-}"
-CONTROL_PLANE_BASE_URL="${CONTROL_PLANE_BASE_URL:-}"
-CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-}"
+CONTROL_PLANE_BASE_URL="${CONTROL_PLANE_BASE_URL:-https://license.bbauto.top}"
+# Default shared key for user-side installer. Can still be overridden by --control-plane-key.
+CONTROL_PLANE_SHARED_KEY="${CONTROL_PLANE_SHARED_KEY:-${BBAUTO_CONTROL_PLANE_SHARED_KEY:-bbauto-shared-key}}"
 
 to_lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -56,7 +57,7 @@ Options:
   --image-registry <value>     Image registry/repo prefix (default: ${IMAGE_REGISTRY})
   --api-image <name>           API image name (default: ${API_IMAGE})
   --worker-image <name>        Worker image name (default: ${WORKER_IMAGE})
-  --image-tag <tag>            Deploy image tag (default: ${IMAGE_TAG})
+  --image-tag <tag>            Deploy image tag (default: from stable channel pointer)
   --update-channel-tag <tag>   Update check channel tag (default: auto from channel)
   --update-channel-name <name>  Update channel name (default: ${UPDATE_CHANNEL_NAME})
   --update-channel-base <url>   Update channel base url (default: ${UPDATE_CHANNEL_BASE})
@@ -65,8 +66,8 @@ Options:
   --email <email>              Let's Encrypt email
   --enable-browser <true|false> Enable browser execution (default: ${ENABLE_BROWSER})
   --storage <postgres|file>    Storage mode (default: ${STORAGE_MODE})
-  --control-plane-url <url>    Control-plane base url (default: ${CONTROL_PLANE_BASE_URL})
-  --control-plane-key <key>    Control-plane shared key
+  --control-plane-url <url>    Control-plane base url (default: built-in)
+  --control-plane-key <key>    Control-plane shared key (default: built-in)
   --registry-user <username>   Optional registry username
   --registry-token <token>     Optional registry token/password
   -h, --help                   Show help
@@ -102,6 +103,12 @@ if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
 fi
 if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
   UPDATE_CHANNEL_TAG="latest"
+fi
+if [[ -z "${IMAGE_TAG}" ]]; then
+  IMAGE_TAG="${UPDATE_CHANNEL_TAG}"
+fi
+if [[ -z "${IMAGE_TAG}" ]]; then
+  IMAGE_TAG="latest"
 fi
 SSL_MODE="$(to_lower "${SSL_MODE}")"
 ENABLE_BROWSER="$(to_lower "${ENABLE_BROWSER}")"
@@ -151,14 +158,8 @@ else
   EMAIL=""
 fi
 
-if [[ -z "${CONTROL_PLANE_BASE_URL}" ]]; then
-  read -rp "Input control-plane license URL (e.g. https://license.bbauto.top): " CONTROL_PLANE_BASE_URL
-fi
-if [[ -z "${CONTROL_PLANE_SHARED_KEY}" ]]; then
-  read -rp "Input control-plane shared key: " CONTROL_PLANE_SHARED_KEY
-fi
 if [[ -z "${CONTROL_PLANE_BASE_URL}" || -z "${CONTROL_PLANE_SHARED_KEY}" ]]; then
-  echo "CONTROL_PLANE_BASE_URL and CONTROL_PLANE_SHARED_KEY are required."
+  echo "CONTROL_PLANE_BASE_URL and CONTROL_PLANE_SHARED_KEY are required (missing built-in defaults)."
   exit 1
 fi
 
