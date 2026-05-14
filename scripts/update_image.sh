@@ -384,12 +384,13 @@ if [[ -n "${TARGET_TAG}" && "${TARGET_TAG}" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; the
 fi
 
 resolve_target_tag_from_channel() {
-  local channel_base channel_name channel_url channel_json_url resolved raw_json parsed_tag
+  local channel_base channel_name channel_url channel_json_url resolved raw_json parsed_tag cache_buster sep
   channel_base="$(sed -n 's/^SELF_UPDATE_CHANNEL_BASE=//p' "${ENV_FILE}" | head -n 1)"
   channel_name="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL=//p' "${ENV_FILE}" | head -n 1)"
   channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
   channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
   channel_name="${CHANNEL_NAME_OVERRIDE:-${channel_name:-stable}}"
+  cache_buster="$(date +%s)"
   if [[ "${channel_base}" == *"/BBexchange/"* ]]; then
     echo "[update] WARN: SELF_UPDATE_CHANNEL_BASE points to BBexchange (${channel_base})."
     echo "[update] WARN: if BBexchange is private, other users may not fetch release channel."
@@ -403,8 +404,21 @@ resolve_target_tag_from_channel() {
   else
     channel_json_url="${channel_url}.json"
   fi
+
+  sep="?"
+  [[ "${channel_url}" == *\?* ]] && sep="&"
+  echo "[update] resolving channel url: ${channel_url}"
+  resolved="$(curl -fsSL -H 'Cache-Control: no-cache' --max-time 10 "${channel_url}${sep}t=${cache_buster}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
+  if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    TARGET_TAG="${resolved}"
+    echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
+    return 0
+  fi
+
+  sep="?"
+  [[ "${channel_json_url}" == *\?* ]] && sep="&"
   echo "[update] resolving channel json url: ${channel_json_url}"
-  raw_json="$(curl -fsSL --max-time 10 "${channel_json_url}" 2>/dev/null || true)"
+  raw_json="$(curl -fsSL -H 'Cache-Control: no-cache' --max-time 10 "${channel_json_url}${sep}t=${cache_buster}" 2>/dev/null || true)"
   if [[ -n "${raw_json}" ]]; then
     parsed_tag="$(printf '%s' "${raw_json}" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' | head -n 1)"
     if [[ "${parsed_tag}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
@@ -412,13 +426,6 @@ resolve_target_tag_from_channel() {
       echo "[update] resolved image tag from channel json (${channel_name}): ${TARGET_TAG}"
       return 0
     fi
-  fi
-  echo "[update] resolving channel url: ${channel_url}"
-  resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
-  if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-    TARGET_TAG="${resolved}"
-    echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
-    return 0
   fi
   echo "[update] ERROR: failed to resolve channel tag from ${channel_url}"
   return 1
