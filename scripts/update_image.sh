@@ -385,6 +385,7 @@ fi
 
 resolve_target_tag_from_channel() {
   local channel_base channel_name channel_url channel_json_url resolved raw_json parsed_tag cache_buster sep
+  local api_url api_json api_b64 api_resolved
   channel_base="$(sed -n 's/^SELF_UPDATE_CHANNEL_BASE=//p' "${ENV_FILE}" | head -n 1)"
   channel_name="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL=//p' "${ENV_FILE}" | head -n 1)"
   channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
@@ -403,6 +404,21 @@ resolve_target_tag_from_channel() {
     channel_url="${channel_url%.json}"
   else
     channel_json_url="${channel_url}.json"
+  fi
+
+  if [[ "${channel_url}" == "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel/"* ]]; then
+    api_url="https://api.github.com/repos/wd9337812/bbexchange-installer/contents/release-channel/${channel_name}?ref=main"
+    echo "[update] resolving channel via GitHub contents API: ${api_url}"
+    api_json="$(curl -fsSL -H 'Cache-Control: no-cache' -H 'Accept: application/vnd.github+json' --max-time 10 "${api_url}" 2>/dev/null || true)"
+    api_b64="$(printf '%s\n' "${api_json}" | sed -n 's/^[[:space:]]*"content":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -d '\r\n ')"
+    if [[ -n "${api_b64}" ]] && command -v base64 >/dev/null 2>&1; then
+      api_resolved="$(printf '%s' "${api_b64}" | base64 -d 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
+      if [[ "${api_resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+        TARGET_TAG="${api_resolved}"
+        echo "[update] resolved image tag from GitHub contents API (${channel_name}): ${TARGET_TAG}"
+        return 0
+      fi
+    fi
   fi
 
   sep="?"
