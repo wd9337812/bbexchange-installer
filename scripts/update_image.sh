@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 TARGET_TAG="${1:-}"
 COMPOSE_FILE="${COMPOSE_FILE:-deploy/docker-compose.image.yml}"
@@ -485,6 +485,21 @@ fi
 mkdir -p apps/backend/data
 CURRENT_TAG="$(sed -n 's/^IMAGE_TAG=//p' "${ENV_FILE}" | head -n 1)"
 ROLLBACK_TAG="${CURRENT_TAG:-}"
+ENV_TAG_WRITTEN=false
+restore_image_tag_on_error() {
+  local code=$?
+  if [[ "${ENV_TAG_WRITTEN}" == "true" && "${TARGET_TAG}" != "${ROLLBACK_TAG}" ]]; then
+    echo "[update] ERROR: update failed before success; restore IMAGE_TAG=${ROLLBACK_TAG:-<empty>}"
+    if [[ -n "${ROLLBACK_TAG}" ]]; then
+      set_env_var "IMAGE_TAG" "${ROLLBACK_TAG}" || true
+    else
+      sed -i '/^IMAGE_TAG=/d' "${ENV_FILE}" || true
+    fi
+  fi
+  trap - ERR
+  exit "${code}"
+}
+trap restore_image_tag_on_error ERR
 if [[ -n "${CURRENT_TAG}" ]]; then
   echo "${CURRENT_TAG}" > "${LAST_TAG_FILE}"
 fi
@@ -500,6 +515,7 @@ if grep -q '^IMAGE_TAG=' "${ENV_FILE}"; then
 else
   echo "IMAGE_TAG=${TARGET_TAG}" >> "${ENV_FILE}"
 fi
+ENV_TAG_WRITTEN=true
 write_env_stamp="${TARGET_TAG}-$(date +%s)"
 if grep -q '^FRONTEND_BUILD_ID=' "${ENV_FILE}"; then
   sed -i "s/^FRONTEND_BUILD_ID=.*/FRONTEND_BUILD_ID=${write_env_stamp}/" "${ENV_FILE}"
@@ -548,6 +564,8 @@ if [[ "${health_ok}" -ne 1 ]]; then
 fi
 
 echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
+trap - ERR
+ENV_TAG_WRITTEN=false
 
 if bool_true "${AUTO_CLEANUP}"; then
   echo "[cleanup] start image retention (keep current + previous rollback)"
