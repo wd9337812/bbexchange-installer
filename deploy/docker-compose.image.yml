@@ -41,6 +41,9 @@ services:
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
       - APP_SERVER_MODE=${APP_SERVER_MODE:-user}
+      - MCP_PUBLIC_ORIGIN=${MCP_PUBLIC_ORIGIN:-}
+      - MCP_ENABLED=${MCP_ENABLED:-true}
+      - MCP_WRITE_ENABLED=${MCP_WRITE_ENABLED:-true}
       - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
       - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
       - CONTROL_PLANE_TIMEOUT_MS=${CONTROL_PLANE_TIMEOUT_MS:-10000}
@@ -114,4 +117,3 @@ volumes:
   pg_data:
   caddy_data:
   caddy_config:
-
