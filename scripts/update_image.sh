@@ -330,6 +330,21 @@ ensure_secret_var() {
 ensure_env_var "TZ" "Asia/Shanghai"
 ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
 ensure_env_var "NODE_ENV" "production"
+ads_api_version="$(get_env_var GOOGLE_ADS_API_VERSION)"
+ads_api_version="${ads_api_version%$'\r'}"
+if [[ "${ads_api_version}" == \"*\" || "${ads_api_version}" == \'*\' ]]; then
+  ads_api_version="${ads_api_version:1:${#ads_api_version}-2}"
+fi
+if [[ -z "${ads_api_version}" || "${ads_api_version}" =~ ^v([1-9]|1[0-9]|2[0-4])$ ]]; then
+  if [[ -n "${ads_api_version}" ]]; then
+    cp -p -- "${ENV_FILE}" "${ENV_FILE}.before-google-ads-v25.$(date -u +%Y%m%dT%H%M%SZ).bak"
+  fi
+  ensure_env_var "GOOGLE_ADS_API_VERSION" "v25"
+  echo "[update] Google Ads API -> v25 (API and Worker; old Google Ads scripts must be recopied)."
+elif [[ ! "${ads_api_version}" =~ ^v[1-9][0-9]*$ ]]; then
+  echo "[update] invalid GOOGLE_ADS_API_VERSION; expected a major version such as v25." >&2
+  exit 33
+fi
 ensure_control_plane_dns_defaults
 require_control_plane_for_user_mode
 ensure_secret_var "AUTH_SECRET"

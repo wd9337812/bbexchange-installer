@@ -64,6 +64,7 @@
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3000
+      - GOOGLE_ADS_API_VERSION=${GOOGLE_ADS_API_VERSION:-v25}
       - TZ=${TZ:-Asia/Shanghai}
       - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
       - REDIS_URL=redis://redis_admin:6379

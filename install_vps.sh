@@ -267,6 +267,7 @@ services:
       - PORT=3000
       - TZ=${TZ:-Asia/Shanghai}
       - APP_TIMEZONE=${APP_TIMEZONE:-Asia/Shanghai}
+      - GOOGLE_ADS_API_VERSION=${GOOGLE_ADS_API_VERSION:-v25}
       - REDIS_URL=redis://redis:6379
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
@@ -318,6 +319,7 @@ services:
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
       - TENANT_CODE=${TENANT_CODE:-local}
       - BROWSER_POOL_SIZE=${BROWSER_POOL_SIZE:-4}
+      - GOOGLE_ADS_API_VERSION=${GOOGLE_ADS_API_VERSION:-v25}
       - OFFER_NAV_TIMEOUT_MS=${OFFER_NAV_TIMEOUT_MS:-20000}
       - CHROMIUM_EXECUTABLE_PATH=${CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium-browser}
       - AUTH_SECRET=${AUTH_SECRET}
@@ -711,6 +713,7 @@ STORAGE_MODE=${STORAGE_MODE}
 ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER}
 TZ=Asia/Shanghai
 APP_TIMEZONE=Asia/Shanghai
+GOOGLE_ADS_API_VERSION=v25
 NODE_ENV=production
 AUTH_SECRET=$(openssl rand -hex 32)
 CREDENTIAL_SECRET=$(openssl rand -hex 32)
