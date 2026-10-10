@@ -284,11 +284,7 @@ run_preflight_upgrade() {
     return 32
   fi
 
-  echo "[preflight] start safe cleanup (without volume prune)..."
-  docker container prune -f || true
-  docker network prune -f || true
-  docker builder prune -af || true
-  docker image prune -af || true
+  echo "[preflight] insufficient capacity; refusing host-wide cleanup. Free disk space explicitly before retrying."
   docker system df || true
   df -h / "${docker_root}" 2>/dev/null || true
   df -ih / "${docker_root}" 2>/dev/null || true
@@ -382,6 +378,7 @@ self_update_ops_assets() {
   fetch_one "scripts/db_backup.sh"
   fetch_one "scripts/rollback_image.sh"
   fetch_one "scripts/update_image.sh"
+  fetch_one "scripts/configure_runtime_resources.sh"
 
   rm -f "${tmp}" >/dev/null 2>&1 || true
   chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/rollback_image.sh scripts/update_image.sh >/dev/null 2>&1 || true
@@ -501,8 +498,23 @@ mkdir -p apps/backend/data
 CURRENT_TAG="$(sed -n 's/^IMAGE_TAG=//p' "${ENV_FILE}" | head -n 1)"
 ROLLBACK_TAG="${CURRENT_TAG:-}"
 ENV_TAG_WRITTEN=false
+SERVICES_SWITCHED=false
+RESOURCE_BACKUP="${REPO_DIR}/apps/backend/data/last_good_resource_env.txt"
+if [[ -f scripts/configure_runtime_resources.sh ]]; then
+  source scripts/configure_runtime_resources.sh
+  capture_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}"
+fi
 restore_image_tag_on_error() {
   local code=$?
+  trap - ERR
+  if [[ "${SERVICES_SWITCHED}" == "true" ]]; then
+    echo '[update] ERROR: services may already use the new image; keep its matching environment.'
+    echo '[update] Inspect service logs. To roll back, use rollback_image.sh; it first drains captured task results.'
+    exit "${code}"
+  fi
+  if [[ -f "${RESOURCE_BACKUP}" ]] && declare -F restore_runtime_resource_env >/dev/null; then
+    restore_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}" || true
+  fi
   if [[ "${ENV_TAG_WRITTEN}" == "true" && "${TARGET_TAG}" != "${ROLLBACK_TAG}" ]]; then
     echo "[update] ERROR: update failed before success; restore IMAGE_TAG=${ROLLBACK_TAG:-<empty>}"
     if [[ -n "${ROLLBACK_TAG}" ]]; then
@@ -511,7 +523,6 @@ restore_image_tag_on_error() {
       sed -i '/^IMAGE_TAG=/d' "${ENV_FILE}" || true
     fi
   fi
-  trap - ERR
   exit "${code}"
 }
 trap restore_image_tag_on_error ERR
@@ -524,6 +535,9 @@ before_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}
 
 echo "[update] backup database/files..."
 bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+if [[ -f scripts/configure_runtime_resources.sh ]]; then
+  bash scripts/configure_runtime_resources.sh "${ENV_FILE}"
+fi
 
 if grep -q '^IMAGE_TAG=' "${ENV_FILE}"; then
   sed -i "s/^IMAGE_TAG=.*/IMAGE_TAG=${TARGET_TAG}/" "${ENV_FILE}"
@@ -558,6 +572,7 @@ echo "[update] migrate schema from image: ${API_IMAGE_REF}"
 SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[update] restart services"
+SERVICES_SWITCHED=true
 IMAGE_TAG="${TARGET_TAG}" docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api worker caddy
 
 echo "[update] health check"
@@ -586,7 +601,6 @@ if bool_true "${AUTO_CLEANUP}"; then
   echo "[cleanup] start image retention (keep current + previous rollback)"
   cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${API_IMAGE_NAME}"
   cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${WORKER_IMAGE_NAME}"
-  docker image prune -f >/dev/null 2>&1 || true
 fi
 
 api_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q api 2>/dev/null || true)"
