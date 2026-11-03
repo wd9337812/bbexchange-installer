@@ -689,6 +689,37 @@ trim_keep "$BACKUP_ROOT/files" "data_*.tar.gz"
 echo "db_backup: done"
 BBAUTO_TTY_DB_BACKUP_SH_20261103
 
+cat > scripts/recover_upgrade_read_locks.sh <<'BBAUTO_V2_RECOVER_UPGRADE_READ_LOCKS_SH_20261104'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+compose=${1:-deploy/docker-compose.image.yml}
+env_file=${2:-.env.prod}
+# Called only after the old producers have drained. Never terminate backends,
+# cancel arbitrary long transactions, or clear execution/advertising locks.
+for role in api worker;do
+  id=$(docker compose --env-file "$env_file" -f "$compose" ps --all -q "$role")
+  if [[ ! "$id" =~ ^[a-f0-9]{12,64}$ ]];then echo "[update] cannot uniquely identify stopped $role; no database query was cancelled";exit 36;fi
+  running=$(docker inspect "$id" --format '{{.State.Running}}')
+  if [[ "$running" != false ]];then echo "[update] $role is not stopped; no database query was cancelled";exit 36;fi
+done
+docker compose --env-file "$env_file" -f "$compose" exec -T postgres sh -lc \
+ 'exec psql -X -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}"' <<'SQL'
+set statement_timeout='5s';
+-- This is the exact 1 KiB prefix fingerprint observed on the affected VPS.
+-- The text/type/age checks additionally fence cancellation to the known SELECT.
+select pid,pg_cancel_backend(pid) as cancelled_known_read
+from pg_stat_activity
+where datname=current_database() and pid<>pg_backend_pid()
+ and backend_type='client backend' and state='active'
+ and query_start<clock_timestamp()-interval '5 seconds'
+ and md5(left(query,1023))='d9527ba3ba913e41b36cd211195181fe'
+ and query ~* '^select q.id,q.task_id,lineage.id problem_id,';
+select pid,state,wait_event_type,clock_timestamp()-query_start as age,
+ pg_blocking_pids(pid) as blocked_by,md5(left(query,1023)) as fingerprint
+from pg_stat_activity where datname=current_database() and pid<>pg_backend_pid()
+ and state<>'idle' order by query_start limit 10;
+SQL
+BBAUTO_V2_RECOVER_UPGRADE_READ_LOCKS_SH_20261104
 cat > scripts/update_image.sh <<'BBAUTO_TTY_UPDATE_IMAGE_SH_20261103'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -711,7 +742,45 @@ ALLOW_STALE_CHANNEL_FALLBACK="${ALLOW_STALE_CHANNEL_FALLBACK:-false}"
 cd "${REPO_DIR}"
 command -v flock >/dev/null || { echo "[update] flock is required for safe upgrade coordination";exit 34; }
 exec 9>"${REPO_DIR}/.bb-update.lock"
-flock -w 5 9 || { echo "[update] another update is running";exit 34; }
+recover_stopped_upgrade_clients() {
+  local fd pid name state parent cwd start before holder=false recovered=0
+  local -A roots=() candidates=() seen=()
+  for fd in /proc/[0-9]*/fd/*; do
+    [[ "$fd" -ef "${REPO_DIR}/.bb-update.lock" ]] 2>/dev/null || continue
+    pid=${fd#/proc/};pid=${pid%%/*};[[ "$pid" != "$$" && -z "${seen[$pid]:-}" ]] || continue
+    seen[$pid]=1
+    name=$(cat "/proc/$pid/comm" 2>/dev/null) || continue
+    [[ "$name" == docker || "$name" == docker-compose ]] || continue
+    state=$(awk '/^State:/{print $2}' "/proc/$pid/status" 2>/dev/null) || continue
+    parent=$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null) || continue
+    cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null) || continue
+    [[ "$state" == T && "$cwd" == "$REPO_DIR" ]] || continue
+    # A stopped client from an orphaned upgrade, not a live updater/user job.
+    [[ "$name" == docker-compose ]] || tr '\0' ' ' < "/proc/$pid/cmdline" | grep -qE '(^| )compose( |$)' || continue
+    candidates[$pid]=$parent
+    [[ "$parent" != 1 ]] || roots[$pid]=1
+  done
+  for pid in "${!candidates[@]}"; do
+    parent=${candidates[$pid]};[[ -n "${roots[$pid]:-}" || -n "${roots[$parent]:-}" ]] || continue
+    before=$(cat "/proc/$pid/stat" 2>/dev/null) || continue
+    start=$(awk '{print $22}' <<< "$before")
+    state=$(awk '/^State:/{print $2}' "/proc/$pid/status" 2>/dev/null) || continue
+    [[ "$state" == T && "$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null)" == "$start" ]] || continue
+    holder=false;for fd in /proc/"$pid"/fd/*;do [[ "$fd" -ef "${REPO_DIR}/.bb-update.lock" ]] 2>/dev/null && holder=true;done
+    [[ "$holder" == true ]] || continue
+    echo "[update] release stopped orphan upgrade client: $pid"
+    kill -TERM "$pid" 2>/dev/null || true
+    kill -CONT "$pid" 2>/dev/null || true
+    recovered=$((recovered+1))
+  done
+  [[ "$recovered" -gt 0 ]]
+}
+if ! flock -w 5 9; then
+  recover_stopped_upgrade_clients || { echo "[update] another update is running; active clients were left unchanged";exit 34; }
+  flock -w 10 9 || { echo "[update] another update is running; active clients were left unchanged";exit 34; }
+fi
+# The parent alone owns the upgrade lock. No Docker/Compose child inherits it.
+docker(){ command docker "$@" 9>&-; }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "env file not found: ${ENV_FILE}"
@@ -1022,6 +1091,7 @@ self_update_ops_assets() {
 
   fetch_one "deploy/docker-compose.image.yml"
   fetch_one "scripts/db_migrate.sh"
+  fetch_one "scripts/recover_upgrade_read_locks.sh"
   fetch_one "scripts/wait_runtime_ready.sh"
   fetch_one "scripts/db_backup.sh"
   fetch_one "scripts/rollback_image.sh"
@@ -1164,7 +1234,7 @@ run_bounded_phase() {
   echo "[update] ${phase}: timeout=${seconds}s; terminal input detached"
   # GNU timeout creates a separate process group. Docker's attached stdin must
   # not read from the SSH terminal in that background group (SIGTTIN).
-  if timeout --kill-after=30s "${seconds}" "$@" </dev/null; then
+  if (exec 9>&-;timeout --kill-after=30s "${seconds}" "$@" </dev/null); then
     return 0
   else
     code=$?
@@ -1214,7 +1284,21 @@ echo "[update] migrate schema from image: ${API_IMAGE_REF}"
 # Durable task/Ads checkpoints stay in PostgreSQL; no queue or counter is cleared.
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop -t 45 api worker
 SERVICES_STOPPED=true
-run_bounded_phase migration "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+migration_log="$(mktemp)"
+chmod 600 "$migration_log"
+if run_bounded_phase migration "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}" >"$migration_log" 2>&1;then
+  cat "$migration_log";rm -f "$migration_log"
+else
+  migration_code=$?;cat "$migration_log"
+  if grep -q 'canceling statement due to lock timeout' "$migration_log" && [[ -f scripts/recover_upgrade_read_locks.sh ]];then
+    echo '[update] migration lock timeout; checking known read-only orphan queries before one retry'
+    bash scripts/recover_upgrade_read_locks.sh "${COMPOSE_FILE}" "${ENV_FILE}" 9>&-
+    rm -f "$migration_log"
+    run_bounded_phase migration-retry "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+  else
+    rm -f "$migration_log";(exit "$migration_code")
+  fi
+fi
 
 echo "[update] restart services"
 SERVICES_SWITCHED=true
@@ -1406,7 +1490,7 @@ while (( SECONDS < deadline )); do
     if [[ "$status" == 401 || "$status" == 403 ]];then last="就绪接口返回 ${status}，请核对实际镜像版本和入口访问配置；旧版 API 可能尚未完成升级。";fi
   done
   if [[ "$matched" == true ]];then consecutive=$((consecutive+1));else consecutive=0;fi
-  if (( consecutive >= 2 ));then echo '[ready] 数据库和 Worker 连续就绪检查通过。';exit 0;fi
+  if (( consecutive >= 2 ));then echo '[ready] 数据库、Worker 和运行任务调度连续就绪检查通过。';exit 0;fi
   sleep 2
 done
 echo "[ready] 等待就绪超时：${last}"

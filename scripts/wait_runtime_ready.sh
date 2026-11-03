@@ -17,7 +17,7 @@ while (( SECONDS < deadline )); do
     if [[ "$status" == 401 || "$status" == 403 ]];then last="就绪接口返回 ${status}，请核对实际镜像版本和入口访问配置；旧版 API 可能尚未完成升级。";fi
   done
   if [[ "$matched" == true ]];then consecutive=$((consecutive+1));else consecutive=0;fi
-  if (( consecutive >= 2 ));then echo '[ready] 数据库和 Worker 连续就绪检查通过。';exit 0;fi
+  if (( consecutive >= 2 ));then echo '[ready] 数据库、Worker 和运行任务调度连续就绪检查通过。';exit 0;fi
   sleep 2
 done
 echo "[ready] 等待就绪超时：${last}"
