@@ -117,6 +117,15 @@ load_migration_sql() {
   cat "$MIGRATIONS_DIR/$file"
 }
 
+ensure_required_schema() {
+  echo "db_migrate: validating required schema..."
+  cat <<'EOF' | run_psql_stdin
+alter table if exists tasks
+  add column if not exists delivery_status varchar(32) not null default '测试中';
+create index if not exists idx_tasks_delivery_status on tasks(delivery_status);
+EOF
+}
+
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d "$POSTGRES_SERVICE"
 
 echo "db_migrate: waiting postgres..."
@@ -124,7 +133,7 @@ READY=false
 i=0
 while [ $i -lt 60 ]; do
   if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-    pg_isready -U postgres -d postgres >/dev/null 2>&1; then
+    pg_isready -U "${POSTGRES_SUPERUSER:-${POSTGRES_USER:-bb}}" -d postgres >/dev/null 2>&1; then
     READY=true
     break
   fi
@@ -138,27 +147,48 @@ if [ "$READY" != "true" ]; then
 fi
 
 ensure_app_identity
-run_psql_cmd "create table if not exists schema_migrations (version varchar(255) primary key, applied_at timestamptz not null default now());"
-
-TASK_EXISTS="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-  sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -tAc \"select 1 from pg_tables where schemaname='public' and tablename='tasks' limit 1;\"" | tr -d '[:space:]')"
-
-if [ "$TASK_EXISTS" != "1" ]; then
-  echo "db_migrate: applying baseline schema..."
-  load_baseline_sql | run_psql_stdin
-  run_psql_cmd "insert into schema_migrations(version) values('0000_phase1_schema') on conflict do nothing;"
+# One psql session owns the upgrade lock. SQL and its marker commit together.
+# Historical migration files are not edited or marked applied speculatively.
+PLAN_FILE="$(mktemp)"
+SQL_DIR=""
+EXTRACT_CONTAINER=""
+cleanup_plan(){
+  rm -f "$PLAN_FILE" "$PLAN_FILE.part"
+  if [ -n "$EXTRACT_CONTAINER" ];then docker rm "$EXTRACT_CONTAINER" >/dev/null 2>&1 || true;fi
+  case "$SQL_DIR" in /tmp/bb-migrate.*) rm -rf -- "$SQL_DIR";; esac
+}
+trap cleanup_plan EXIT
+if [ -n "$SOURCE_IMAGE" ];then
+  SQL_DIR="$(mktemp -d /tmp/bb-migrate.XXXXXX)"
+  EXTRACT_CONTAINER="$(docker create --entrypoint sh "$SOURCE_IMAGE")"
+  SQL_COPY_DIR="$SQL_DIR"
+  if command -v cygpath >/dev/null 2>&1;then SQL_COPY_DIR="$(cygpath -w "$SQL_DIR")";fi
+  docker cp "$EXTRACT_CONTAINER:/app/apps/backend/sql/." "$SQL_COPY_DIR" >/dev/null
+  docker rm "$EXTRACT_CONTAINER" >/dev/null
+  EXTRACT_CONTAINER=""
+  BASELINE_SCHEMA="$SQL_DIR/phase1_schema.sql"
+  MIGRATIONS_DIR="$SQL_DIR/migrations"
+  SOURCE_IMAGE=""
 fi
-
-for v in $(list_migration_files); do
-    applied="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
-      sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -tAc \"select 1 from schema_migrations where version='${v}' limit 1;\"" | tr -d '[:space:]')"
-    if [ "$applied" = "1" ]; then
-      echo "db_migrate: skip $v"
-      continue
-    fi
-    echo "db_migrate: apply $v"
-    load_migration_sql "$v" | run_psql_stdin
-    run_psql_cmd "insert into schema_migrations(version) values('${v}');"
-done
-
+migration_files="$(list_migration_files)"
+{
+  printf '%s\n' "set lock_timeout='30s';" "set statement_timeout='300s';" "select pg_advisory_lock(2740082);" \
+    "create table if not exists schema_migrations(version varchar(255) primary key,applied_at timestamptz not null default now());"
+  printf '%s\n' "select to_regclass('tasks') is not null as baseline_exists \\gset" '\if :baseline_exists' '\else' 'begin;'
+  load_baseline_sql > "$PLAN_FILE.part"
+  LC_ALL=C sed '1s/^\xEF\xBB\xBF//' "$PLAN_FILE.part"
+  printf '%s\n' "insert into schema_migrations(version) values('0000_phase1_schema') on conflict do nothing;" 'commit;' '\endif'
+  for v in $migration_files; do
+    case "$v" in *[!A-Za-z0-9_.-]*) echo 'Invalid migration filename' >&2;exit 1;; esac
+    printf '%s\n' "select exists(select 1 from schema_migrations where version='$v') as migration_applied \\gset" '\if :migration_applied' '\else' 'begin;' "set local lock_timeout='5s';" "set local statement_timeout='300s';"
+    printf '%s\n' "\echo db_migrate: apply $v"
+    # All current migrations use ordinary transactional DDL. A future concurrent
+    # index migration requires a separate explicit, validity-checked runner.
+    load_migration_sql "$v" > "$PLAN_FILE.part"
+    LC_ALL=C sed '1s/^\xEF\xBB\xBF//' "$PLAN_FILE.part"
+    printf '\n%s\n' "insert into schema_migrations(version) values('$v');" 'commit;' '\endif'
+  done
+  printf '%s\n' 'select pg_advisory_unlock(2740082);'
+} > "$PLAN_FILE"
+run_psql_stdin < "$PLAN_FILE"
 echo "db_migrate: done"

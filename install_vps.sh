@@ -226,6 +226,9 @@ fi
 echo "[2/7] Preparing deployment directory..."
 mkdir -p "${INSTALL_DIR}/deploy" "${INSTALL_DIR}/scripts" "${INSTALL_DIR}/apps/backend/data" "${INSTALL_DIR}/apps/backend/sql/migrations"
 cd "${INSTALL_DIR}"
+command -v flock >/dev/null || { echo "[install] flock is required";exit 34; }
+exec 8>"${INSTALL_DIR}/.bb-update.lock"
+flock -w 5 8 || { echo "[install] another install/update is running";exit 34; }
 
 echo "[3/7] Writing compose and helper scripts..."
 cat > deploy/docker-compose.image.yml <<'EOF'
@@ -361,17 +364,18 @@ volumes:
   caddy_config:
 EOF
 
-cat > scripts/db_migrate.sh <<'EOF'
+cat > scripts/db_migrate.sh <<'BBAUTO_EMBED_DB_MIGRATE_SH_20261103'
 #!/bin/sh
 set -eu
 
-COMPOSE_FILE="${1:-deploy/docker-compose.image.yml}"
+COMPOSE_FILE="${1:-deploy/docker-compose.prod.yml}"
 ENV_FILE="${2:-.env.prod}"
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-apps/backend/sql/migrations}"
 BASELINE_SCHEMA="${BASELINE_SCHEMA:-apps/backend/sql/phase1_schema.sql}"
 SOURCE_IMAGE="${SOURCE_IMAGE:-}"
 SOURCE_BASELINE_SCHEMA="${SOURCE_BASELINE_SCHEMA:-/app/apps/backend/sql/phase1_schema.sql}"
 SOURCE_MIGRATIONS_DIR="${SOURCE_MIGRATIONS_DIR:-/app/apps/backend/sql/migrations}"
+POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres}"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "env file not found: $ENV_FILE"
@@ -387,9 +391,69 @@ if [ "${STORAGE_MODE:-postgres}" != "postgres" ]; then
   exit 0
 fi
 
+SERVICES="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --services 2>/dev/null || true)"
+if ! printf '%s\n' "$SERVICES" | grep -qx "$POSTGRES_SERVICE"; then
+  if printf '%s\n' "$SERVICES" | grep -qx "postgres_admin"; then
+    POSTGRES_SERVICE="postgres_admin"
+  fi
+fi
+
 run_psql_stdin() {
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}'" >/dev/null
+}
+
+run_super_psql_stdin() {
+  SUPERUSER_ROLE="${POSTGRES_SUPERUSER:-${POSTGRES_USER:-bb}}"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    psql -v ON_ERROR_STOP=1 -U "${SUPERUSER_ROLE}" -d postgres >/dev/null
+}
+
+run_psql_cmd() {
+  sql="$1"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -c \"$sql\"" >/dev/null
+}
+
+sql_escape_literal() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+ensure_app_identity() {
+  APP_USER="${POSTGRES_USER:-bb}"
+  APP_DB="${POSTGRES_DB:-bbexchange}"
+  APP_PASS="${POSTGRES_PASSWORD:-bb_change_me}"
+  APP_USER_ESC="$(sql_escape_literal "$APP_USER")"
+  APP_DB_ESC="$(sql_escape_literal "$APP_DB")"
+  APP_PASS_ESC="$(sql_escape_literal "$APP_PASS")"
+
+  if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${APP_PASS}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${APP_USER}' -d '${APP_DB}' -c 'select 1;' >/dev/null" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "db_migrate: app db credential mismatch detected, repairing role/db mapping..."
+  cat <<EOF | run_super_psql_stdin
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${APP_USER_ESC}') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  ELSE
+    EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='${APP_DB_ESC}') THEN
+    EXECUTE format('CREATE DATABASE %I OWNER %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+  END IF;
+  EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+END
+\$\$;
+EOF
+
+  if ! docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${APP_PASS}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${APP_USER}' -d '${APP_DB}' -c 'select 1;' >/dev/null" >/dev/null 2>&1; then
+    echo "db_migrate: failed to repair app db credential"
+    exit 1
+  fi
 }
 
 load_baseline_sql() {
@@ -420,14 +484,23 @@ load_migration_sql() {
   cat "$MIGRATIONS_DIR/$file"
 }
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres
+ensure_required_schema() {
+  echo "db_migrate: validating required schema..."
+  cat <<'EOF' | run_psql_stdin
+alter table if exists tasks
+  add column if not exists delivery_status varchar(32) not null default '测试中';
+create index if not exists idx_tasks_delivery_status on tasks(delivery_status);
+EOF
+}
+
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d "$POSTGRES_SERVICE"
 
 echo "db_migrate: waiting postgres..."
 READY=false
 i=0
 while [ $i -lt 60 ]; do
-  if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-    pg_isready -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null 2>&1; then
+  if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    pg_isready -U "${POSTGRES_SUPERUSER:-${POSTGRES_USER:-bb}}" -d postgres >/dev/null 2>&1; then
     READY=true
     break
   fi
@@ -440,39 +513,53 @@ if [ "$READY" != "true" ]; then
   exit 1
 fi
 
-docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
-  -c "create table if not exists schema_migrations (version varchar(255) primary key, applied_at timestamptz not null default now());" >/dev/null
-
-TASK_EXISTS="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-  psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" -tAc \
-  "select 1 from pg_tables where schemaname='public' and tablename='tasks' limit 1;" | tr -d '[:space:]')"
-
-if [ "$TASK_EXISTS" != "1" ]; then
-  echo "db_migrate: applying baseline schema..."
-  load_baseline_sql | run_psql_stdin
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
-    -c "insert into schema_migrations(version) values('0000_phase1_schema') on conflict do nothing;" >/dev/null
+ensure_app_identity
+# One psql session owns the upgrade lock. SQL and its marker commit together.
+# Historical migration files are not edited or marked applied speculatively.
+PLAN_FILE="$(mktemp)"
+SQL_DIR=""
+EXTRACT_CONTAINER=""
+cleanup_plan(){
+  rm -f "$PLAN_FILE" "$PLAN_FILE.part"
+  if [ -n "$EXTRACT_CONTAINER" ];then docker rm "$EXTRACT_CONTAINER" >/dev/null 2>&1 || true;fi
+  case "$SQL_DIR" in /tmp/bb-migrate.*) rm -rf -- "$SQL_DIR";; esac
+}
+trap cleanup_plan EXIT
+if [ -n "$SOURCE_IMAGE" ];then
+  SQL_DIR="$(mktemp -d /tmp/bb-migrate.XXXXXX)"
+  EXTRACT_CONTAINER="$(docker create --entrypoint sh "$SOURCE_IMAGE")"
+  SQL_COPY_DIR="$SQL_DIR"
+  if command -v cygpath >/dev/null 2>&1;then SQL_COPY_DIR="$(cygpath -w "$SQL_DIR")";fi
+  docker cp "$EXTRACT_CONTAINER:/app/apps/backend/sql/." "$SQL_COPY_DIR" >/dev/null
+  docker rm "$EXTRACT_CONTAINER" >/dev/null
+  EXTRACT_CONTAINER=""
+  BASELINE_SCHEMA="$SQL_DIR/phase1_schema.sql"
+  MIGRATIONS_DIR="$SQL_DIR/migrations"
+  SOURCE_IMAGE=""
 fi
-
-for v in $(list_migration_files); do
-  applied="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" -tAc \
-    "select 1 from schema_migrations where version='${v}' limit 1;" | tr -d '[:space:]')"
-  if [ "$applied" = "1" ]; then
-    echo "db_migrate: skip $v"
-    continue
-  fi
-  echo "db_migrate: apply $v"
-  load_migration_sql "$v" | run_psql_stdin
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-    psql -v ON_ERROR_STOP=1 -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" \
-    -c "insert into schema_migrations(version) values('${v}');" >/dev/null
-done
-
+migration_files="$(list_migration_files)"
+{
+  printf '%s\n' "set lock_timeout='30s';" "set statement_timeout='300s';" "select pg_advisory_lock(2740082);" \
+    "create table if not exists schema_migrations(version varchar(255) primary key,applied_at timestamptz not null default now());"
+  printf '%s\n' "select to_regclass('tasks') is not null as baseline_exists \\gset" '\if :baseline_exists' '\else' 'begin;'
+  load_baseline_sql > "$PLAN_FILE.part"
+  LC_ALL=C sed '1s/^\xEF\xBB\xBF//' "$PLAN_FILE.part"
+  printf '%s\n' "insert into schema_migrations(version) values('0000_phase1_schema') on conflict do nothing;" 'commit;' '\endif'
+  for v in $migration_files; do
+    case "$v" in *[!A-Za-z0-9_.-]*) echo 'Invalid migration filename' >&2;exit 1;; esac
+    printf '%s\n' "select exists(select 1 from schema_migrations where version='$v') as migration_applied \\gset" '\if :migration_applied' '\else' 'begin;' "set local lock_timeout='5s';" "set local statement_timeout='300s';"
+    printf '%s\n' "\echo db_migrate: apply $v"
+    # All current migrations use ordinary transactional DDL. A future concurrent
+    # index migration requires a separate explicit, validity-checked runner.
+    load_migration_sql "$v" > "$PLAN_FILE.part"
+    LC_ALL=C sed '1s/^\xEF\xBB\xBF//' "$PLAN_FILE.part"
+    printf '\n%s\n' "insert into schema_migrations(version) values('$v');" 'commit;' '\endif'
+  done
+  printf '%s\n' 'select pg_advisory_unlock(2740082);'
+} > "$PLAN_FILE"
+run_psql_stdin < "$PLAN_FILE"
 echo "db_migrate: done"
-EOF
+BBAUTO_EMBED_DB_MIGRATE_SH_20261103
 
 cat > scripts/db_backup.sh <<'EOF'
 #!/bin/sh
@@ -522,7 +609,7 @@ trim_keep "$BACKUP_ROOT/files" "data_*.tar.gz"
 echo "db_backup: done"
 EOF
 
-cat > scripts/update_image.sh <<'EOF'
+cat > scripts/update_image.sh <<'BBAUTO_EMBED_UPDATE_IMAGE_SH_20261103'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -542,6 +629,9 @@ CHANNEL_NAME_OVERRIDE=""
 ALLOW_STALE_CHANNEL_FALLBACK="${ALLOW_STALE_CHANNEL_FALLBACK:-false}"
 
 cd "${REPO_DIR}"
+command -v flock >/dev/null || { echo "[update] flock is required for safe upgrade coordination";exit 34; }
+exec 9>"${REPO_DIR}/.bb-update.lock"
+flock -w 5 9 || { echo "[update] another update is running";exit 34; }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "env file not found: ${ENV_FILE}"
@@ -694,54 +784,6 @@ bool_true() {
   local v="${1:-}"
   v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
   [[ "${v}" == "1" || "${v}" == "true" || "${v}" == "yes" || "${v}" == "on" ]]
-}
-
-in_keep_tags() {
-  local tag="$1"
-  shift
-  local keep
-  for keep in "$@"; do
-    [[ "${tag}" == "${keep}" ]] && return 0
-  done
-  return 1
-}
-
-cleanup_old_app_images() {
-  local rollback_tag="$1"
-  local image_repo="$2"
-  local image_name="$3"
-  local keep_tags=("${TARGET_TAG}")
-  local tag
-  local refs=()
-  local removed=0
-
-  if [[ -n "${rollback_tag}" && "${rollback_tag}" != "${TARGET_TAG}" ]]; then
-    keep_tags+=("${rollback_tag}")
-  fi
-
-  while IFS= read -r tag; do
-    [[ -z "${tag}" || "${tag}" == "<none>" ]] && continue
-    if in_keep_tags "${tag}" "${keep_tags[@]}"; then
-      continue
-    fi
-    refs+=("${image_repo}/${image_name}:${tag}")
-  done < <(docker images "${image_repo}/${image_name}" --format '{{.Tag}}' | sort -u)
-
-  if [[ "${#refs[@]}" -eq 0 ]]; then
-    echo "[cleanup] ${image_name}: no old tag to remove (kept: ${keep_tags[*]})"
-    return 0
-  fi
-
-  echo "[cleanup] ${image_name}: keep tags ${keep_tags[*]}, remove old tags ${#refs[@]}"
-  for tag in "${refs[@]}"; do
-    if docker image rm "${tag}" >/dev/null 2>&1; then
-      removed=$((removed + 1))
-      echo "[cleanup] removed ${tag}"
-    else
-      echo "[cleanup] skip ${tag} (possibly in use)"
-    fi
-  done
-  echo "[cleanup] ${image_name}: removed ${removed}/${#refs[@]} old tags"
 }
 
 check_path_capacity() {
@@ -900,6 +942,7 @@ self_update_ops_assets() {
 
   fetch_one "deploy/docker-compose.image.yml"
   fetch_one "scripts/db_migrate.sh"
+  fetch_one "scripts/wait_runtime_ready.sh"
   fetch_one "scripts/db_backup.sh"
   fetch_one "scripts/rollback_image.sh"
   fetch_one "scripts/update_image.sh"
@@ -921,64 +964,32 @@ if [[ -n "${TARGET_TAG}" && "${TARGET_TAG}" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; the
 fi
 
 resolve_target_tag_from_channel() {
-  local channel_base channel_name channel_url channel_json_url resolved raw_json parsed_tag cache_buster sep
-  local api_url api_json api_b64 api_resolved
+  local channel_base channel_name channel_url resolved
   channel_base="$(sed -n 's/^SELF_UPDATE_CHANNEL_BASE=//p' "${ENV_FILE}" | head -n 1)"
   channel_name="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL=//p' "${ENV_FILE}" | head -n 1)"
   channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
   channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
+  if [[ "${channel_base}" == *"/wd9337812/BBexchange/"* ]]; then
+    echo "[update] WARN: private application channel detected, switching to public installer stable channel."
+    channel_base="${CHANNEL_BASE_DEFAULT}"
+  fi
   channel_name="${CHANNEL_NAME_OVERRIDE:-${channel_name:-stable}}"
-  cache_buster="$(date +%s)"
   if [[ "${channel_base}" == *"/BBexchange/"* ]]; then
     echo "[update] WARN: SELF_UPDATE_CHANNEL_BASE points to BBexchange (${channel_base})."
     echo "[update] WARN: if BBexchange is private, other users may not fetch release channel."
   fi
   if [[ -z "${channel_url}" ]]; then
     channel_url="${channel_base%/}/${channel_name}"
+  elif [[ "${channel_url}" == *"/wd9337812/BBexchange/"* ]]; then
+    echo "[update] WARN: private application channel URL detected, switching to public installer stable channel."
+    channel_url="${CHANNEL_BASE_DEFAULT%/}/${channel_name}"
   fi
-  if [[ "${channel_url}" =~ \.json$ ]]; then
-    channel_json_url="${channel_url}"
-    channel_url="${channel_url%.json}"
-  else
-    channel_json_url="${channel_url}.json"
-  fi
-
-  if [[ "${channel_url}" == "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel/"* ]]; then
-    api_url="https://api.github.com/repos/wd9337812/bbexchange-installer/contents/release-channel/${channel_name}?ref=main"
-    echo "[update] resolving channel via GitHub contents API: ${api_url}"
-    api_json="$(curl -fsSL -H 'Cache-Control: no-cache' -H 'Accept: application/vnd.github+json' --max-time 10 "${api_url}" 2>/dev/null || true)"
-    api_b64="$(printf '%s\n' "${api_json}" | sed -n 's/^[[:space:]]*"content":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -d '\r\n ')"
-    if [[ -n "${api_b64}" ]] && command -v base64 >/dev/null 2>&1; then
-      api_resolved="$(printf '%s' "${api_b64}" | base64 -d 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
-      if [[ "${api_resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-        TARGET_TAG="${api_resolved}"
-        echo "[update] resolved image tag from GitHub contents API (${channel_name}): ${TARGET_TAG}"
-        return 0
-      fi
-    fi
-  fi
-
-  sep="?"
-  [[ "${channel_url}" == *\?* ]] && sep="&"
   echo "[update] resolving channel url: ${channel_url}"
-  resolved="$(curl -fsSL -H 'Cache-Control: no-cache' --max-time 10 "${channel_url}${sep}t=${cache_buster}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
+  resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
   if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     TARGET_TAG="${resolved}"
     echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
     return 0
-  fi
-
-  sep="?"
-  [[ "${channel_json_url}" == *\?* ]] && sep="&"
-  echo "[update] resolving channel json url: ${channel_json_url}"
-  raw_json="$(curl -fsSL -H 'Cache-Control: no-cache' --max-time 10 "${channel_json_url}${sep}t=${cache_buster}" 2>/dev/null || true)"
-  if [[ -n "${raw_json}" ]]; then
-    parsed_tag="$(printf '%s' "${raw_json}" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' | head -n 1)"
-    if [[ "${parsed_tag}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-      TARGET_TAG="${parsed_tag}"
-      echo "[update] resolved image tag from channel json (${channel_name}): ${TARGET_TAG}"
-      return 0
-    fi
   fi
   echo "[update] ERROR: failed to resolve channel tag from ${channel_url}"
   return 1
@@ -1013,7 +1024,9 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! run_preflight_upgrade; then
+if run_preflight_upgrade; then
+  :
+else
   code=$?
   echo "[update] preflight failed with code=${code}"
   exit "${code}"
@@ -1024,10 +1037,17 @@ CURRENT_TAG="$(sed -n 's/^IMAGE_TAG=//p' "${ENV_FILE}" | head -n 1)"
 ROLLBACK_TAG="${CURRENT_TAG:-}"
 ENV_TAG_WRITTEN=false
 SERVICES_SWITCHED=false
+SERVICES_STOPPED=false
+CURRENT_VERIFIED_FILE="${REPO_DIR}/apps/backend/data/current_verified_image_tag.txt"
+CURRENT_RESOURCE_FILE="${REPO_DIR}/apps/backend/data/current_verified_resource_env.txt"
+PREVIOUS_VERIFIED_FILE="${REPO_DIR}/apps/backend/data/previous_verified_image_tag.txt"
+ATTEMPT_FILE="${REPO_DIR}/apps/backend/data/update_attempt.txt"
+printf '%s\n' "${TARGET_TAG}" > "${ATTEMPT_FILE}.tmp"
+mv "${ATTEMPT_FILE}.tmp" "${ATTEMPT_FILE}"
 RESOURCE_BACKUP="${REPO_DIR}/apps/backend/data/last_good_resource_env.txt"
 if [[ -f scripts/configure_runtime_resources.sh ]]; then
   source scripts/configure_runtime_resources.sh
-  capture_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}"
+  capture_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}.attempt"
 fi
 restore_image_tag_on_error() {
   local code=$?
@@ -1037,8 +1057,8 @@ restore_image_tag_on_error() {
     echo '[update] Inspect service logs. To roll back, use rollback_image.sh; it first drains captured task results.'
     exit "${code}"
   fi
-  if [[ -f "${RESOURCE_BACKUP}" ]] && declare -F restore_runtime_resource_env >/dev/null; then
-    restore_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}" || true
+  if [[ -f "${RESOURCE_BACKUP}.attempt" ]] && declare -F restore_runtime_resource_env >/dev/null; then
+    restore_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}.attempt" || true
   fi
   if [[ "${ENV_TAG_WRITTEN}" == "true" && "${TARGET_TAG}" != "${ROLLBACK_TAG}" ]]; then
     echo "[update] ERROR: update failed before success; restore IMAGE_TAG=${ROLLBACK_TAG:-<empty>}"
@@ -1048,18 +1068,17 @@ restore_image_tag_on_error() {
       sed -i '/^IMAGE_TAG=/d' "${ENV_FILE}" || true
     fi
   fi
+  if [[ "${SERVICES_STOPPED}" == true ]];then echo "[update] old services were stopped; inspect migration result and rerun this update. No automatic Ads replay was performed.";fi
   exit "${code}"
 }
 trap restore_image_tag_on_error ERR
-if [[ -n "${CURRENT_TAG}" ]]; then
-  echo "${CURRENT_TAG}" > "${LAST_TAG_FILE}"
-fi
+echo "[update] preserve verified rollback records until the new version is ready"
 
 before_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 before_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 
 echo "[update] backup database/files..."
-bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+timeout "${DB_BACKUP_TIMEOUT_SEC:-180}" bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 if [[ -f scripts/configure_runtime_resources.sh ]]; then
   bash scripts/configure_runtime_resources.sh "${ENV_FILE}"
 fi
@@ -1094,40 +1113,42 @@ if [[ "${TARGET_TAG}" == "latest" && -n "${before_api_id}" && -n "${after_api_id
 fi
 
 echo "[update] migrate schema from image: ${API_IMAGE_REF}"
-SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+# Closing the old producers rolls back their metadata transactions before DDL.
+# Durable task/Ads checkpoints stay in PostgreSQL; no queue or counter is cleared.
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop -t 45 api worker
+SERVICES_STOPPED=true
+timeout "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[update] restart services"
 SERVICES_SWITCHED=true
 IMAGE_TAG="${TARGET_TAG}" docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api worker caddy
 
-echo "[update] health check"
-health_ok=0
-for i in 1 2 3 4 5; do
-  if curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null 2>&1; then
-    health_ok=1
-    break
-  fi
-  if curl -fsS --max-time 10 http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
-    health_ok=1
-    break
-  fi
-  sleep 2
-done
-if [[ "${health_ok}" -ne 1 ]]; then
-  echo "[update] ERROR: health check failed after retries."
+echo "[update] waiting for database and Worker readiness"
+if ! bash scripts/wait_runtime_ready.sh;then
+  docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
+  echo '[update] failed before readiness; verified rollback pointers were not replaced.'
   exit 33
 fi
-
+verified_current="$(cat "${CURRENT_VERIFIED_FILE}" 2>/dev/null || true)"
+if [[ -n "${verified_current}" && "${verified_current}" != "${TARGET_TAG}" ]];then
+  printf '%s\n' "${verified_current}" > "${PREVIOUS_VERIFIED_FILE}.tmp"
+  mv "${PREVIOUS_VERIFIED_FILE}.tmp" "${PREVIOUS_VERIFIED_FILE}"
+  printf '%s\n' "${verified_current}" > "${LAST_TAG_FILE}.tmp"
+  mv "${LAST_TAG_FILE}.tmp" "${LAST_TAG_FILE}"
+  if [[ -f "${CURRENT_RESOURCE_FILE}" ]] && grep -qx "# verified_image_tag=${verified_current}" "${CURRENT_RESOURCE_FILE}";then
+    cp -p "${CURRENT_RESOURCE_FILE}" "${RESOURCE_BACKUP}"
+  elif [[ "${verified_current}" == "${CURRENT_TAG}" && -f "${RESOURCE_BACKUP}.attempt" ]];then cp -p "${RESOURCE_BACKUP}.attempt" "${RESOURCE_BACKUP}";fi
+fi
+if declare -F capture_runtime_resource_env >/dev/null;then
+  capture_runtime_resource_env "${ENV_FILE}" "${CURRENT_RESOURCE_FILE}.values"
+  { printf '# verified_image_tag=%s\n' "${TARGET_TAG}";cat "${CURRENT_RESOURCE_FILE}.values"; } > "${CURRENT_RESOURCE_FILE}.tmp"
+  mv "${CURRENT_RESOURCE_FILE}.tmp" "${CURRENT_RESOURCE_FILE}"
+fi
+printf '%s\n' "${TARGET_TAG}" > "${CURRENT_VERIFIED_FILE}.tmp"
+mv "${CURRENT_VERIFIED_FILE}.tmp" "${CURRENT_VERIFIED_FILE}"
 echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
 trap - ERR
 ENV_TAG_WRITTEN=false
-
-if bool_true "${AUTO_CLEANUP}"; then
-  echo "[cleanup] start image retention (keep current + previous rollback)"
-  cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${API_IMAGE_NAME}"
-  cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${WORKER_IMAGE_NAME}"
-fi
-
 api_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q api 2>/dev/null || true)"
 worker_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q worker 2>/dev/null || true)"
 api_started="$(docker inspect -f '{{.State.StartedAt}}' "${api_cid}" 2>/dev/null || true)"
@@ -1136,9 +1157,9 @@ api_digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${API_IMAGE_RE
 worker_digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${WORKER_IMAGE_REF}" 2>/dev/null || true)"
 echo "[summary] api image id=${after_api_id} started_at=${api_started} digest=${api_digest:-unknown}"
 echo "[summary] worker image id=${after_worker_id} started_at=${worker_started} digest=${worker_digest:-unknown}"
-EOF
+BBAUTO_EMBED_UPDATE_IMAGE_SH_20261103
 
-cat > scripts/rollback_image.sh <<'EOF'
+cat > scripts/rollback_image.sh <<'BBAUTO_EMBED_ROLLBACK_IMAGE_SH_20261103'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -1150,6 +1171,9 @@ LAST_TAG_FILE="${REPO_DIR}/apps/backend/data/last_good_image_tag.txt"
 RESOURCE_BACKUP="${REPO_DIR}/apps/backend/data/last_good_resource_env.txt"
 
 cd "${REPO_DIR}"
+command -v flock >/dev/null || { echo '[rollback] flock is required';exit 34; }
+exec 9>"${REPO_DIR}/.bb-update.lock"
+flock -w 5 9 || { echo '[rollback] another install/update is running';exit 34; }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "env file not found: ${ENV_FILE}"
@@ -1157,8 +1181,12 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 
 if [[ -z "${TARGET_TAG}" ]]; then
-  if [[ -f "${LAST_TAG_FILE}" ]]; then
-    TARGET_TAG="$(cat "${LAST_TAG_FILE}")"
+  if [[ -f "${REPO_DIR}/apps/backend/data/previous_verified_image_tag.txt" ]];then
+    TARGET_TAG="$(cat "${REPO_DIR}/apps/backend/data/previous_verified_image_tag.txt")"
+  elif [[ -f "${LAST_TAG_FILE}" ]]; then
+    echo "[rollback] legacy tag is an unverified candidate; verify the intended version before switching." >&2
+    echo "Candidate: $(cat "${LAST_TAG_FILE}")" >&2
+    exit 35
   fi
 fi
 
@@ -1223,6 +1251,7 @@ fi
 
 if [[ -f scripts/configure_runtime_resources.sh && -f "${RESOURCE_BACKUP}" ]]; then
   source scripts/configure_runtime_resources.sh
+  capture_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}.rollback-attempt"
   restore_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}"
 fi
 
@@ -1239,12 +1268,621 @@ if [[ "${HTTP_PAUSED}" == true ]]; then
   compose exec -T worker node -e 'const q=require("./apps/backend/src/queue").createTaskQueue();q.queue.resume().then(()=>q.queue.close()).then(()=>q.connection.quit()).catch(e=>{console.error(e.message);process.exitCode=1;});'
 fi
 
-curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null
+ALLOW_LEGACY_READINESS=true bash scripts/wait_runtime_ready.sh
+verified_current="$(cat apps/backend/data/current_verified_image_tag.txt 2>/dev/null || true)"
+if [[ -n "${verified_current}" && "${verified_current}" != "${TARGET_TAG}" ]];then
+  printf '%s\n' "${verified_current}" > apps/backend/data/previous_verified_image_tag.txt.tmp
+  mv apps/backend/data/previous_verified_image_tag.txt.tmp apps/backend/data/previous_verified_image_tag.txt
+  if [[ -f apps/backend/data/current_verified_resource_env.txt ]] && grep -qx "# verified_image_tag=${verified_current}" apps/backend/data/current_verified_resource_env.txt;then
+    cp -p apps/backend/data/current_verified_resource_env.txt "${RESOURCE_BACKUP}"
+  elif [[ "${verified_current}" == "${CURRENT_TAG}" && -f "${RESOURCE_BACKUP}.rollback-attempt" ]];then cp -p "${RESOURCE_BACKUP}.rollback-attempt" "${RESOURCE_BACKUP}";fi
+fi
+if declare -F capture_runtime_resource_env >/dev/null;then
+  capture_runtime_resource_env "${ENV_FILE}" apps/backend/data/current_verified_resource_env.txt.values
+  { printf '# verified_image_tag=%s\n' "${TARGET_TAG}";cat apps/backend/data/current_verified_resource_env.txt.values; } > apps/backend/data/current_verified_resource_env.txt.tmp
+  mv apps/backend/data/current_verified_resource_env.txt.tmp apps/backend/data/current_verified_resource_env.txt
+fi
+printf '%s\n' "${TARGET_TAG}" > apps/backend/data/current_verified_image_tag.txt.tmp
+mv apps/backend/data/current_verified_image_tag.txt.tmp apps/backend/data/current_verified_image_tag.txt
 echo "[rollback] success: IMAGE_TAG=${TARGET_TAG}"
 trap - ERR
-EOF
+BBAUTO_EMBED_ROLLBACK_IMAGE_SH_20261103
 
-chmod +x scripts/db_migrate.sh scripts/db_backup.sh scripts/update_image.sh scripts/rollback_image.sh
+cat > scripts/wait_runtime_ready.sh <<'BBAUTO_READINESS_20261103'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+deadline=$((SECONDS + ${READINESS_TIMEOUT_SEC:-180}))
+consecutive=0
+last='服务正在启动'
+while (( SECONDS < deadline )); do
+  matched=false
+  for base in http://127.0.0.1 http://127.0.0.1:8080; do
+    response="$(curl -sS --max-time 3 -w 
+
+if [[ ! -f ".env.prod" ]]; then
+  TENANT_CODE_VALUE="tenant-$(openssl rand -hex 6)"
+  cat > .env.prod <<EOF
+POSTGRES_USER=bb
+POSTGRES_PASSWORD=$(openssl rand -hex 16)
+POSTGRES_DB=bbexchange
+STORAGE_MODE=${STORAGE_MODE}
+ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER}
+TZ=Asia/Shanghai
+APP_TIMEZONE=Asia/Shanghai
+GOOGLE_ADS_API_VERSION=v25
+NODE_ENV=production
+AUTH_SECRET=$(openssl rand -hex 32)
+CREDENTIAL_SECRET=$(openssl rand -hex 32)
+TENANT_CODE=${TENANT_CODE_VALUE}
+APP_SERVER_MODE=user
+MCP_PUBLIC_ORIGIN=${MCP_ORIGIN_VALUE}
+CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL}
+CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY}
+CONTROL_PLANE_TIMEOUT_MS=8000
+CONTROL_PLANE_DNS_HOST=${CONTROL_PLANE_DNS_HOST}
+CONTROL_PLANE_DNS_IP=${CONTROL_PLANE_DNS_IP}
+DOCKER_DNS_1=${DOCKER_DNS_1}
+DOCKER_DNS_2=${DOCKER_DNS_2}
+IMAGE_REGISTRY=${IMAGE_REGISTRY}
+API_IMAGE=${API_IMAGE}
+WORKER_IMAGE=${WORKER_IMAGE}
+IMAGE_TAG=${IMAGE_TAG}
+SELF_UPDATE_ENABLED=false
+SELF_UPDATE_MODE=manual_image_ops
+SELF_UPDATE_REPO_DIR=/workspace
+SELF_UPDATE_HOST_REPO_DIR=${INSTALL_DIR}
+SELF_UPDATE_IMAGE_COMPOSE_FILE=deploy/docker-compose.image.yml
+SELF_UPDATE_CHANNEL_BASE=${UPDATE_CHANNEL_BASE}
+SELF_UPDATE_IMAGE_CHANNEL=${UPDATE_CHANNEL_NAME}
+SELF_UPDATE_IMAGE_CHANNEL_TAG=${UPDATE_CHANNEL_TAG}
+SELF_UPDATE_IMAGE_CHANNEL_URL=
+SELF_UPDATE_HELPER_IMAGE=docker:27-cli
+SELF_UPDATE_INSTALLER_RAW_BASE=https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main
+EOF
+fi
+
+ensure_env_var() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" .env.prod; then
+    sed -i "s|^${key}=.*|${key}=${value}|" .env.prod
+  else
+    echo "${key}=${value}" >> .env.prod
+  fi
+}
+
+ensure_env_var_if_missing() {
+  local key="$1"
+  local value="$2"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    ensure_env_var "${key}" "${value}"
+  fi
+}
+
+ensure_secret_var() {
+  local key="$1"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    if grep -q "^${key}=" .env.prod; then
+      sed -i "s/^${key}=.*/${key}=$(openssl rand -hex 32)/" .env.prod
+    else
+      echo "${key}=$(openssl rand -hex 32)" >> .env.prod
+    fi
+  fi
+}
+
+ensure_env_var "IMAGE_REGISTRY" "${IMAGE_REGISTRY}"
+ensure_env_var "API_IMAGE" "${API_IMAGE}"
+ensure_env_var "WORKER_IMAGE" "${WORKER_IMAGE}"
+ensure_env_var "IMAGE_TAG" "${IMAGE_TAG}"
+ensure_env_var "STORAGE_MODE" "${STORAGE_MODE}"
+ensure_env_var "ENABLE_BROWSER_EXECUTION" "${ENABLE_BROWSER}"
+if curl -fsSL --max-time 30 https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/scripts/configure_runtime_resources.sh -o scripts/configure_runtime_resources.sh; then
+  bash scripts/configure_runtime_resources.sh .env.prod
+else
+  echo 'Resource helper unavailable; worker will conservatively detect resources at startup.'
+fi
+ensure_env_var "TZ" "Asia/Shanghai"
+ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
+ensure_env_var "NODE_ENV" "production"
+ensure_env_var_if_missing "TENANT_CODE" "tenant-$(openssl rand -hex 6)"
+ensure_env_var "APP_SERVER_MODE" "user"
+ensure_env_var "CONTROL_PLANE_BASE_URL" "${CONTROL_PLANE_BASE_URL}"
+ensure_env_var "CONTROL_PLANE_SHARED_KEY" "${CONTROL_PLANE_SHARED_KEY}"
+ensure_env_var "CONTROL_PLANE_TIMEOUT_MS" "8000"
+ensure_env_var "CONTROL_PLANE_DNS_HOST" "${CONTROL_PLANE_DNS_HOST}"
+ensure_env_var "CONTROL_PLANE_DNS_IP" "${CONTROL_PLANE_DNS_IP}"
+ensure_env_var "DOCKER_DNS_1" "${DOCKER_DNS_1}"
+ensure_env_var "DOCKER_DNS_2" "${DOCKER_DNS_2}"
+ensure_env_var "SELF_UPDATE_ENABLED" "false"
+ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
+ensure_env_var "SELF_UPDATE_REPO_DIR" "/workspace"
+ensure_env_var "SELF_UPDATE_HOST_REPO_DIR" "${INSTALL_DIR}"
+ensure_env_var "SELF_UPDATE_IMAGE_COMPOSE_FILE" "deploy/docker-compose.image.yml"
+ensure_env_var "SELF_UPDATE_CHANNEL_BASE" "${UPDATE_CHANNEL_BASE}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL" "${UPDATE_CHANNEL_NAME}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_TAG" "${UPDATE_CHANNEL_TAG}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_URL" ""
+ensure_env_var "SELF_UPDATE_HELPER_IMAGE" "docker:27-cli"
+ensure_env_var "SELF_UPDATE_INSTALLER_RAW_BASE" "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
+ensure_env_var "MCP_PUBLIC_ORIGIN" "${MCP_ORIGIN_VALUE}"
+ensure_secret_var "AUTH_SECRET"
+ensure_secret_var "CREDENTIAL_SECRET"
+
+echo "[4/7] Writing Caddy config..."
+if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
+  cat > deploy/Caddyfile <<EOF
+{
+  email ${EMAIL}
+}
+
+${DOMAIN} {
+  encode gzip
+  reverse_proxy api:3000
+}
+EOF
+else
+  cat > deploy/Caddyfile <<'EOF'
+:80 {
+  encode gzip
+  reverse_proxy api:3000
+}
+EOF
+fi
+
+echo "[5/7] Optional registry login..."
+if [[ -n "${REGISTRY_USER}" && -n "${REGISTRY_TOKEN}" ]]; then
+  REGISTRY_HOST="$(echo "${IMAGE_REGISTRY}" | cut -d'/' -f1)"
+  echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USER}" --password-stdin
+fi
+
+echo "[6/7] Pulling images and applying DB schema..."
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d redis postgres
+
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml pull api worker
+API_REF="${IMAGE_REGISTRY}/${API_IMAGE}:${IMAGE_TAG}"
+TMP_CID="$(docker create "${API_REF}" sh -lc 'sleep 10')"
+docker cp "${TMP_CID}:/app/apps/backend/sql/." "${INSTALL_DIR}/apps/backend/sql/"
+docker rm -f "${TMP_CID}" >/dev/null
+
+sh scripts/db_migrate.sh deploy/docker-compose.image.yml .env.prod
+
+echo "[7/7] Starting services and health check..."
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d api worker caddy
+bash scripts/wait_runtime_ready.sh
+
+TENANT_CODE_VALUE="$(sed -n 's/^TENANT_CODE=//p' .env.prod | head -n 1)"
+PROBE_URL="${CONTROL_PLANE_BASE_URL%/}/api/internal/subscription/current?tenantCode=${TENANT_CODE_VALUE}"
+PROBE_BODY="$(mktemp)"
+PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+  -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+  -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+  "${PROBE_URL}" || true)"
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "[install] probe retry with pinned resolve: ${CONTROL_PLANE_DNS_HOST} -> ${CONTROL_PLANE_DNS_IP}"
+  PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+    --resolve "${CONTROL_PLANE_DNS_HOST}:443:${CONTROL_PLANE_DNS_IP}" \
+    -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+    -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+    "${PROBE_URL}" || true)"
+fi
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "Control-plane probe failed (code=${PROBE_CODE}): ${PROBE_URL}"
+  echo "Response: $(head -c 300 "${PROBE_BODY}" 2>/dev/null || true)"
+  rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+  exit 1
+fi
+rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+
+echo ""
+printf '%s\n' "${IMAGE_TAG}" > apps/backend/data/current_verified_image_tag.txt.tmp
+mv apps/backend/data/current_verified_image_tag.txt.tmp apps/backend/data/current_verified_image_tag.txt
+echo "Install complete."
+echo "Status: docker compose --env-file .env.prod -f deploy/docker-compose.image.yml ps"
+if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
+  echo "URL: https://${DOMAIN}"
+else
+  echo "URL: http://<YOUR_VPS_PUBLIC_IP>"
+fi
+\n%{http_code}' "${base}/api/readiness" 2>/dev/null || true)"
+    status="${response##*
+
+if [[ ! -f ".env.prod" ]]; then
+  TENANT_CODE_VALUE="tenant-$(openssl rand -hex 6)"
+  cat > .env.prod <<EOF
+POSTGRES_USER=bb
+POSTGRES_PASSWORD=$(openssl rand -hex 16)
+POSTGRES_DB=bbexchange
+STORAGE_MODE=${STORAGE_MODE}
+ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER}
+TZ=Asia/Shanghai
+APP_TIMEZONE=Asia/Shanghai
+GOOGLE_ADS_API_VERSION=v25
+NODE_ENV=production
+AUTH_SECRET=$(openssl rand -hex 32)
+CREDENTIAL_SECRET=$(openssl rand -hex 32)
+TENANT_CODE=${TENANT_CODE_VALUE}
+APP_SERVER_MODE=user
+MCP_PUBLIC_ORIGIN=${MCP_ORIGIN_VALUE}
+CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL}
+CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY}
+CONTROL_PLANE_TIMEOUT_MS=8000
+CONTROL_PLANE_DNS_HOST=${CONTROL_PLANE_DNS_HOST}
+CONTROL_PLANE_DNS_IP=${CONTROL_PLANE_DNS_IP}
+DOCKER_DNS_1=${DOCKER_DNS_1}
+DOCKER_DNS_2=${DOCKER_DNS_2}
+IMAGE_REGISTRY=${IMAGE_REGISTRY}
+API_IMAGE=${API_IMAGE}
+WORKER_IMAGE=${WORKER_IMAGE}
+IMAGE_TAG=${IMAGE_TAG}
+SELF_UPDATE_ENABLED=false
+SELF_UPDATE_MODE=manual_image_ops
+SELF_UPDATE_REPO_DIR=/workspace
+SELF_UPDATE_HOST_REPO_DIR=${INSTALL_DIR}
+SELF_UPDATE_IMAGE_COMPOSE_FILE=deploy/docker-compose.image.yml
+SELF_UPDATE_CHANNEL_BASE=${UPDATE_CHANNEL_BASE}
+SELF_UPDATE_IMAGE_CHANNEL=${UPDATE_CHANNEL_NAME}
+SELF_UPDATE_IMAGE_CHANNEL_TAG=${UPDATE_CHANNEL_TAG}
+SELF_UPDATE_IMAGE_CHANNEL_URL=
+SELF_UPDATE_HELPER_IMAGE=docker:27-cli
+SELF_UPDATE_INSTALLER_RAW_BASE=https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main
+EOF
+fi
+
+ensure_env_var() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" .env.prod; then
+    sed -i "s|^${key}=.*|${key}=${value}|" .env.prod
+  else
+    echo "${key}=${value}" >> .env.prod
+  fi
+}
+
+ensure_env_var_if_missing() {
+  local key="$1"
+  local value="$2"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    ensure_env_var "${key}" "${value}"
+  fi
+}
+
+ensure_secret_var() {
+  local key="$1"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    if grep -q "^${key}=" .env.prod; then
+      sed -i "s/^${key}=.*/${key}=$(openssl rand -hex 32)/" .env.prod
+    else
+      echo "${key}=$(openssl rand -hex 32)" >> .env.prod
+    fi
+  fi
+}
+
+ensure_env_var "IMAGE_REGISTRY" "${IMAGE_REGISTRY}"
+ensure_env_var "API_IMAGE" "${API_IMAGE}"
+ensure_env_var "WORKER_IMAGE" "${WORKER_IMAGE}"
+ensure_env_var "IMAGE_TAG" "${IMAGE_TAG}"
+ensure_env_var "STORAGE_MODE" "${STORAGE_MODE}"
+ensure_env_var "ENABLE_BROWSER_EXECUTION" "${ENABLE_BROWSER}"
+if curl -fsSL --max-time 30 https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/scripts/configure_runtime_resources.sh -o scripts/configure_runtime_resources.sh; then
+  bash scripts/configure_runtime_resources.sh .env.prod
+else
+  echo 'Resource helper unavailable; worker will conservatively detect resources at startup.'
+fi
+ensure_env_var "TZ" "Asia/Shanghai"
+ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
+ensure_env_var "NODE_ENV" "production"
+ensure_env_var_if_missing "TENANT_CODE" "tenant-$(openssl rand -hex 6)"
+ensure_env_var "APP_SERVER_MODE" "user"
+ensure_env_var "CONTROL_PLANE_BASE_URL" "${CONTROL_PLANE_BASE_URL}"
+ensure_env_var "CONTROL_PLANE_SHARED_KEY" "${CONTROL_PLANE_SHARED_KEY}"
+ensure_env_var "CONTROL_PLANE_TIMEOUT_MS" "8000"
+ensure_env_var "CONTROL_PLANE_DNS_HOST" "${CONTROL_PLANE_DNS_HOST}"
+ensure_env_var "CONTROL_PLANE_DNS_IP" "${CONTROL_PLANE_DNS_IP}"
+ensure_env_var "DOCKER_DNS_1" "${DOCKER_DNS_1}"
+ensure_env_var "DOCKER_DNS_2" "${DOCKER_DNS_2}"
+ensure_env_var "SELF_UPDATE_ENABLED" "false"
+ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
+ensure_env_var "SELF_UPDATE_REPO_DIR" "/workspace"
+ensure_env_var "SELF_UPDATE_HOST_REPO_DIR" "${INSTALL_DIR}"
+ensure_env_var "SELF_UPDATE_IMAGE_COMPOSE_FILE" "deploy/docker-compose.image.yml"
+ensure_env_var "SELF_UPDATE_CHANNEL_BASE" "${UPDATE_CHANNEL_BASE}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL" "${UPDATE_CHANNEL_NAME}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_TAG" "${UPDATE_CHANNEL_TAG}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_URL" ""
+ensure_env_var "SELF_UPDATE_HELPER_IMAGE" "docker:27-cli"
+ensure_env_var "SELF_UPDATE_INSTALLER_RAW_BASE" "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
+ensure_env_var "MCP_PUBLIC_ORIGIN" "${MCP_ORIGIN_VALUE}"
+ensure_secret_var "AUTH_SECRET"
+ensure_secret_var "CREDENTIAL_SECRET"
+
+echo "[4/7] Writing Caddy config..."
+if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
+  cat > deploy/Caddyfile <<EOF
+{
+  email ${EMAIL}
+}
+
+${DOMAIN} {
+  encode gzip
+  reverse_proxy api:3000
+}
+EOF
+else
+  cat > deploy/Caddyfile <<'EOF'
+:80 {
+  encode gzip
+  reverse_proxy api:3000
+}
+EOF
+fi
+
+echo "[5/7] Optional registry login..."
+if [[ -n "${REGISTRY_USER}" && -n "${REGISTRY_TOKEN}" ]]; then
+  REGISTRY_HOST="$(echo "${IMAGE_REGISTRY}" | cut -d'/' -f1)"
+  echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USER}" --password-stdin
+fi
+
+echo "[6/7] Pulling images and applying DB schema..."
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d redis postgres
+
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml pull api worker
+API_REF="${IMAGE_REGISTRY}/${API_IMAGE}:${IMAGE_TAG}"
+TMP_CID="$(docker create "${API_REF}" sh -lc 'sleep 10')"
+docker cp "${TMP_CID}:/app/apps/backend/sql/." "${INSTALL_DIR}/apps/backend/sql/"
+docker rm -f "${TMP_CID}" >/dev/null
+
+sh scripts/db_migrate.sh deploy/docker-compose.image.yml .env.prod
+
+echo "[7/7] Starting services and health check..."
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d api worker caddy
+sleep 3
+curl -fsS http://127.0.0.1/api/health
+
+TENANT_CODE_VALUE="$(sed -n 's/^TENANT_CODE=//p' .env.prod | head -n 1)"
+PROBE_URL="${CONTROL_PLANE_BASE_URL%/}/api/internal/subscription/current?tenantCode=${TENANT_CODE_VALUE}"
+PROBE_BODY="$(mktemp)"
+PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+  -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+  -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+  "${PROBE_URL}" || true)"
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "[install] probe retry with pinned resolve: ${CONTROL_PLANE_DNS_HOST} -> ${CONTROL_PLANE_DNS_IP}"
+  PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+    --resolve "${CONTROL_PLANE_DNS_HOST}:443:${CONTROL_PLANE_DNS_IP}" \
+    -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+    -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+    "${PROBE_URL}" || true)"
+fi
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "Control-plane probe failed (code=${PROBE_CODE}): ${PROBE_URL}"
+  echo "Response: $(head -c 300 "${PROBE_BODY}" 2>/dev/null || true)"
+  rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+  exit 1
+fi
+rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+
+echo ""
+echo "Install complete."
+echo "Status: docker compose --env-file .env.prod -f deploy/docker-compose.image.yml ps"
+if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
+  echo "URL: https://${DOMAIN}"
+else
+  echo "URL: http://<YOUR_VPS_PUBLIC_IP>"
+fi
+\n'}"
+    if [[ "$status" == 200 ]] && grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"$response"; then matched=true;break;fi
+    if [[ "$status" == 404 && "${ALLOW_LEGACY_READINESS:-false}" == true ]] && curl -fsS --max-time 3 "${base}/api/health" >/dev/null 2>&1; then
+      echo '[ready] 旧版本仅支持存活检查，无法据此验证全部业务推进。'
+      matched=true;break
+    fi
+    if [[ "$status" == 503 ]];then last="${response%
+
+if [[ ! -f ".env.prod" ]]; then
+  TENANT_CODE_VALUE="tenant-$(openssl rand -hex 6)"
+  cat > .env.prod <<EOF
+POSTGRES_USER=bb
+POSTGRES_PASSWORD=$(openssl rand -hex 16)
+POSTGRES_DB=bbexchange
+STORAGE_MODE=${STORAGE_MODE}
+ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER}
+TZ=Asia/Shanghai
+APP_TIMEZONE=Asia/Shanghai
+GOOGLE_ADS_API_VERSION=v25
+NODE_ENV=production
+AUTH_SECRET=$(openssl rand -hex 32)
+CREDENTIAL_SECRET=$(openssl rand -hex 32)
+TENANT_CODE=${TENANT_CODE_VALUE}
+APP_SERVER_MODE=user
+MCP_PUBLIC_ORIGIN=${MCP_ORIGIN_VALUE}
+CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL}
+CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY}
+CONTROL_PLANE_TIMEOUT_MS=8000
+CONTROL_PLANE_DNS_HOST=${CONTROL_PLANE_DNS_HOST}
+CONTROL_PLANE_DNS_IP=${CONTROL_PLANE_DNS_IP}
+DOCKER_DNS_1=${DOCKER_DNS_1}
+DOCKER_DNS_2=${DOCKER_DNS_2}
+IMAGE_REGISTRY=${IMAGE_REGISTRY}
+API_IMAGE=${API_IMAGE}
+WORKER_IMAGE=${WORKER_IMAGE}
+IMAGE_TAG=${IMAGE_TAG}
+SELF_UPDATE_ENABLED=false
+SELF_UPDATE_MODE=manual_image_ops
+SELF_UPDATE_REPO_DIR=/workspace
+SELF_UPDATE_HOST_REPO_DIR=${INSTALL_DIR}
+SELF_UPDATE_IMAGE_COMPOSE_FILE=deploy/docker-compose.image.yml
+SELF_UPDATE_CHANNEL_BASE=${UPDATE_CHANNEL_BASE}
+SELF_UPDATE_IMAGE_CHANNEL=${UPDATE_CHANNEL_NAME}
+SELF_UPDATE_IMAGE_CHANNEL_TAG=${UPDATE_CHANNEL_TAG}
+SELF_UPDATE_IMAGE_CHANNEL_URL=
+SELF_UPDATE_HELPER_IMAGE=docker:27-cli
+SELF_UPDATE_INSTALLER_RAW_BASE=https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main
+EOF
+fi
+
+ensure_env_var() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" .env.prod; then
+    sed -i "s|^${key}=.*|${key}=${value}|" .env.prod
+  else
+    echo "${key}=${value}" >> .env.prod
+  fi
+}
+
+ensure_env_var_if_missing() {
+  local key="$1"
+  local value="$2"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    ensure_env_var "${key}" "${value}"
+  fi
+}
+
+ensure_secret_var() {
+  local key="$1"
+  local current
+  current="$(sed -n "s/^${key}=//p" .env.prod | head -n 1)"
+  if [[ -z "${current}" ]]; then
+    if grep -q "^${key}=" .env.prod; then
+      sed -i "s/^${key}=.*/${key}=$(openssl rand -hex 32)/" .env.prod
+    else
+      echo "${key}=$(openssl rand -hex 32)" >> .env.prod
+    fi
+  fi
+}
+
+ensure_env_var "IMAGE_REGISTRY" "${IMAGE_REGISTRY}"
+ensure_env_var "API_IMAGE" "${API_IMAGE}"
+ensure_env_var "WORKER_IMAGE" "${WORKER_IMAGE}"
+ensure_env_var "IMAGE_TAG" "${IMAGE_TAG}"
+ensure_env_var "STORAGE_MODE" "${STORAGE_MODE}"
+ensure_env_var "ENABLE_BROWSER_EXECUTION" "${ENABLE_BROWSER}"
+if curl -fsSL --max-time 30 https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/scripts/configure_runtime_resources.sh -o scripts/configure_runtime_resources.sh; then
+  bash scripts/configure_runtime_resources.sh .env.prod
+else
+  echo 'Resource helper unavailable; worker will conservatively detect resources at startup.'
+fi
+ensure_env_var "TZ" "Asia/Shanghai"
+ensure_env_var "APP_TIMEZONE" "Asia/Shanghai"
+ensure_env_var "NODE_ENV" "production"
+ensure_env_var_if_missing "TENANT_CODE" "tenant-$(openssl rand -hex 6)"
+ensure_env_var "APP_SERVER_MODE" "user"
+ensure_env_var "CONTROL_PLANE_BASE_URL" "${CONTROL_PLANE_BASE_URL}"
+ensure_env_var "CONTROL_PLANE_SHARED_KEY" "${CONTROL_PLANE_SHARED_KEY}"
+ensure_env_var "CONTROL_PLANE_TIMEOUT_MS" "8000"
+ensure_env_var "CONTROL_PLANE_DNS_HOST" "${CONTROL_PLANE_DNS_HOST}"
+ensure_env_var "CONTROL_PLANE_DNS_IP" "${CONTROL_PLANE_DNS_IP}"
+ensure_env_var "DOCKER_DNS_1" "${DOCKER_DNS_1}"
+ensure_env_var "DOCKER_DNS_2" "${DOCKER_DNS_2}"
+ensure_env_var "SELF_UPDATE_ENABLED" "false"
+ensure_env_var "SELF_UPDATE_MODE" "manual_image_ops"
+ensure_env_var "SELF_UPDATE_REPO_DIR" "/workspace"
+ensure_env_var "SELF_UPDATE_HOST_REPO_DIR" "${INSTALL_DIR}"
+ensure_env_var "SELF_UPDATE_IMAGE_COMPOSE_FILE" "deploy/docker-compose.image.yml"
+ensure_env_var "SELF_UPDATE_CHANNEL_BASE" "${UPDATE_CHANNEL_BASE}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL" "${UPDATE_CHANNEL_NAME}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_TAG" "${UPDATE_CHANNEL_TAG}"
+ensure_env_var "SELF_UPDATE_IMAGE_CHANNEL_URL" ""
+ensure_env_var "SELF_UPDATE_HELPER_IMAGE" "docker:27-cli"
+ensure_env_var "SELF_UPDATE_INSTALLER_RAW_BASE" "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main"
+ensure_env_var "MCP_PUBLIC_ORIGIN" "${MCP_ORIGIN_VALUE}"
+ensure_secret_var "AUTH_SECRET"
+ensure_secret_var "CREDENTIAL_SECRET"
+
+echo "[4/7] Writing Caddy config..."
+if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
+  cat > deploy/Caddyfile <<EOF
+{
+  email ${EMAIL}
+}
+
+${DOMAIN} {
+  encode gzip
+  reverse_proxy api:3000
+}
+EOF
+else
+  cat > deploy/Caddyfile <<'EOF'
+:80 {
+  encode gzip
+  reverse_proxy api:3000
+}
+EOF
+fi
+
+echo "[5/7] Optional registry login..."
+if [[ -n "${REGISTRY_USER}" && -n "${REGISTRY_TOKEN}" ]]; then
+  REGISTRY_HOST="$(echo "${IMAGE_REGISTRY}" | cut -d'/' -f1)"
+  echo "${REGISTRY_TOKEN}" | docker login "${REGISTRY_HOST}" -u "${REGISTRY_USER}" --password-stdin
+fi
+
+echo "[6/7] Pulling images and applying DB schema..."
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d redis postgres
+
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml pull api worker
+API_REF="${IMAGE_REGISTRY}/${API_IMAGE}:${IMAGE_TAG}"
+TMP_CID="$(docker create "${API_REF}" sh -lc 'sleep 10')"
+docker cp "${TMP_CID}:/app/apps/backend/sql/." "${INSTALL_DIR}/apps/backend/sql/"
+docker rm -f "${TMP_CID}" >/dev/null
+
+sh scripts/db_migrate.sh deploy/docker-compose.image.yml .env.prod
+
+echo "[7/7] Starting services and health check..."
+docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d api worker caddy
+sleep 3
+curl -fsS http://127.0.0.1/api/health
+
+TENANT_CODE_VALUE="$(sed -n 's/^TENANT_CODE=//p' .env.prod | head -n 1)"
+PROBE_URL="${CONTROL_PLANE_BASE_URL%/}/api/internal/subscription/current?tenantCode=${TENANT_CODE_VALUE}"
+PROBE_BODY="$(mktemp)"
+PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+  -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+  -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+  "${PROBE_URL}" || true)"
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "[install] probe retry with pinned resolve: ${CONTROL_PLANE_DNS_HOST} -> ${CONTROL_PLANE_DNS_IP}"
+  PROBE_CODE="$(curl -sS -m 12 -o "${PROBE_BODY}" -w "%{http_code}" \
+    --resolve "${CONTROL_PLANE_DNS_HOST}:443:${CONTROL_PLANE_DNS_IP}" \
+    -H "X-Control-Plane-Key: ${CONTROL_PLANE_SHARED_KEY}" \
+    -H "X-Tenant-Code: ${TENANT_CODE_VALUE}" \
+    "${PROBE_URL}" || true)"
+fi
+if [[ "${PROBE_CODE}" != "200" ]]; then
+  echo "Control-plane probe failed (code=${PROBE_CODE}): ${PROBE_URL}"
+  echo "Response: $(head -c 300 "${PROBE_BODY}" 2>/dev/null || true)"
+  rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+  exit 1
+fi
+rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
+
+echo ""
+echo "Install complete."
+echo "Status: docker compose --env-file .env.prod -f deploy/docker-compose.image.yml ps"
+if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
+  echo "URL: https://${DOMAIN}"
+else
+  echo "URL: http://<YOUR_VPS_PUBLIC_IP>"
+fi
+\n'*}";fi
+  done
+  if [[ "$matched" == true ]];then consecutive=$((consecutive+1));else consecutive=0;fi
+  if (( consecutive >= 2 ));then echo '[ready] 数据库和 Worker 连续就绪检查通过。';exit 0;fi
+  sleep 2
+done
+echo "[ready] 等待就绪超时：${last}"
+echo '[ready] 请查看 docker compose 容器状态及 api/worker 日志；未自动重发广告或回滚数据。'
+exit 33
+BBAUTO_READINESS_20261103
+chmod +x scripts/wait_runtime_ready.sh scripts/db_migrate.sh scripts/db_backup.sh scripts/update_image.sh scripts/rollback_image.sh
 
 if [[ ! -f ".env.prod" ]]; then
   TENANT_CODE_VALUE="tenant-$(openssl rand -hex 6)"

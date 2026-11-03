@@ -9,6 +9,9 @@ LAST_TAG_FILE="${REPO_DIR}/apps/backend/data/last_good_image_tag.txt"
 RESOURCE_BACKUP="${REPO_DIR}/apps/backend/data/last_good_resource_env.txt"
 
 cd "${REPO_DIR}"
+command -v flock >/dev/null || { echo '[rollback] flock is required';exit 34; }
+exec 9>"${REPO_DIR}/.bb-update.lock"
+flock -w 5 9 || { echo '[rollback] another install/update is running';exit 34; }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "env file not found: ${ENV_FILE}"
@@ -16,8 +19,12 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 
 if [[ -z "${TARGET_TAG}" ]]; then
-  if [[ -f "${LAST_TAG_FILE}" ]]; then
-    TARGET_TAG="$(cat "${LAST_TAG_FILE}")"
+  if [[ -f "${REPO_DIR}/apps/backend/data/previous_verified_image_tag.txt" ]];then
+    TARGET_TAG="$(cat "${REPO_DIR}/apps/backend/data/previous_verified_image_tag.txt")"
+  elif [[ -f "${LAST_TAG_FILE}" ]]; then
+    echo "[rollback] legacy tag is an unverified candidate; verify the intended version before switching." >&2
+    echo "Candidate: $(cat "${LAST_TAG_FILE}")" >&2
+    exit 35
   fi
 fi
 
@@ -82,6 +89,7 @@ fi
 
 if [[ -f scripts/configure_runtime_resources.sh && -f "${RESOURCE_BACKUP}" ]]; then
   source scripts/configure_runtime_resources.sh
+  capture_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}.rollback-attempt"
   restore_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}"
 fi
 
@@ -98,6 +106,21 @@ if [[ "${HTTP_PAUSED}" == true ]]; then
   compose exec -T worker node -e 'const q=require("./apps/backend/src/queue").createTaskQueue();q.queue.resume().then(()=>q.queue.close()).then(()=>q.connection.quit()).catch(e=>{console.error(e.message);process.exitCode=1;});'
 fi
 
-curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null
+ALLOW_LEGACY_READINESS=true bash scripts/wait_runtime_ready.sh
+verified_current="$(cat apps/backend/data/current_verified_image_tag.txt 2>/dev/null || true)"
+if [[ -n "${verified_current}" && "${verified_current}" != "${TARGET_TAG}" ]];then
+  printf '%s\n' "${verified_current}" > apps/backend/data/previous_verified_image_tag.txt.tmp
+  mv apps/backend/data/previous_verified_image_tag.txt.tmp apps/backend/data/previous_verified_image_tag.txt
+  if [[ -f apps/backend/data/current_verified_resource_env.txt ]] && grep -qx "# verified_image_tag=${verified_current}" apps/backend/data/current_verified_resource_env.txt;then
+    cp -p apps/backend/data/current_verified_resource_env.txt "${RESOURCE_BACKUP}"
+  elif [[ "${verified_current}" == "${CURRENT_TAG}" && -f "${RESOURCE_BACKUP}.rollback-attempt" ]];then cp -p "${RESOURCE_BACKUP}.rollback-attempt" "${RESOURCE_BACKUP}";fi
+fi
+if declare -F capture_runtime_resource_env >/dev/null;then
+  capture_runtime_resource_env "${ENV_FILE}" apps/backend/data/current_verified_resource_env.txt.values
+  { printf '# verified_image_tag=%s\n' "${TARGET_TAG}";cat apps/backend/data/current_verified_resource_env.txt.values; } > apps/backend/data/current_verified_resource_env.txt.tmp
+  mv apps/backend/data/current_verified_resource_env.txt.tmp apps/backend/data/current_verified_resource_env.txt
+fi
+printf '%s\n' "${TARGET_TAG}" > apps/backend/data/current_verified_image_tag.txt.tmp
+mv apps/backend/data/current_verified_image_tag.txt.tmp apps/backend/data/current_verified_image_tag.txt
 echo "[rollback] success: IMAGE_TAG=${TARGET_TAG}"
 trap - ERR

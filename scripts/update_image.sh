@@ -17,6 +17,9 @@ CHANNEL_NAME_OVERRIDE=""
 ALLOW_STALE_CHANNEL_FALLBACK="${ALLOW_STALE_CHANNEL_FALLBACK:-false}"
 
 cd "${REPO_DIR}"
+command -v flock >/dev/null || { echo "[update] flock is required for safe upgrade coordination";exit 34; }
+exec 9>"${REPO_DIR}/.bb-update.lock"
+flock -w 5 9 || { echo "[update] another update is running";exit 34; }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "env file not found: ${ENV_FILE}"
@@ -169,54 +172,6 @@ bool_true() {
   local v="${1:-}"
   v="$(echo "${v}" | tr '[:upper:]' '[:lower:]')"
   [[ "${v}" == "1" || "${v}" == "true" || "${v}" == "yes" || "${v}" == "on" ]]
-}
-
-in_keep_tags() {
-  local tag="$1"
-  shift
-  local keep
-  for keep in "$@"; do
-    [[ "${tag}" == "${keep}" ]] && return 0
-  done
-  return 1
-}
-
-cleanup_old_app_images() {
-  local rollback_tag="$1"
-  local image_repo="$2"
-  local image_name="$3"
-  local keep_tags=("${TARGET_TAG}")
-  local tag
-  local refs=()
-  local removed=0
-
-  if [[ -n "${rollback_tag}" && "${rollback_tag}" != "${TARGET_TAG}" ]]; then
-    keep_tags+=("${rollback_tag}")
-  fi
-
-  while IFS= read -r tag; do
-    [[ -z "${tag}" || "${tag}" == "<none>" ]] && continue
-    if in_keep_tags "${tag}" "${keep_tags[@]}"; then
-      continue
-    fi
-    refs+=("${image_repo}/${image_name}:${tag}")
-  done < <(docker images "${image_repo}/${image_name}" --format '{{.Tag}}' | sort -u)
-
-  if [[ "${#refs[@]}" -eq 0 ]]; then
-    echo "[cleanup] ${image_name}: no old tag to remove (kept: ${keep_tags[*]})"
-    return 0
-  fi
-
-  echo "[cleanup] ${image_name}: keep tags ${keep_tags[*]}, remove old tags ${#refs[@]}"
-  for tag in "${refs[@]}"; do
-    if docker image rm "${tag}" >/dev/null 2>&1; then
-      removed=$((removed + 1))
-      echo "[cleanup] removed ${tag}"
-    else
-      echo "[cleanup] skip ${tag} (possibly in use)"
-    fi
-  done
-  echo "[cleanup] ${image_name}: removed ${removed}/${#refs[@]} old tags"
 }
 
 check_path_capacity() {
@@ -375,6 +330,7 @@ self_update_ops_assets() {
 
   fetch_one "deploy/docker-compose.image.yml"
   fetch_one "scripts/db_migrate.sh"
+  fetch_one "scripts/wait_runtime_ready.sh"
   fetch_one "scripts/db_backup.sh"
   fetch_one "scripts/rollback_image.sh"
   fetch_one "scripts/update_image.sh"
@@ -396,64 +352,32 @@ if [[ -n "${TARGET_TAG}" && "${TARGET_TAG}" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; the
 fi
 
 resolve_target_tag_from_channel() {
-  local channel_base channel_name channel_url channel_json_url resolved raw_json parsed_tag cache_buster sep
-  local api_url api_json api_b64 api_resolved
+  local channel_base channel_name channel_url resolved
   channel_base="$(sed -n 's/^SELF_UPDATE_CHANNEL_BASE=//p' "${ENV_FILE}" | head -n 1)"
   channel_name="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL=//p' "${ENV_FILE}" | head -n 1)"
   channel_url="$(sed -n 's/^SELF_UPDATE_IMAGE_CHANNEL_URL=//p' "${ENV_FILE}" | head -n 1)"
   channel_base="${channel_base:-${CHANNEL_BASE_DEFAULT}}"
+  if [[ "${channel_base}" == *"/wd9337812/BBexchange/"* ]]; then
+    echo "[update] WARN: private application channel detected, switching to public installer stable channel."
+    channel_base="${CHANNEL_BASE_DEFAULT}"
+  fi
   channel_name="${CHANNEL_NAME_OVERRIDE:-${channel_name:-stable}}"
-  cache_buster="$(date +%s)"
   if [[ "${channel_base}" == *"/BBexchange/"* ]]; then
     echo "[update] WARN: SELF_UPDATE_CHANNEL_BASE points to BBexchange (${channel_base})."
     echo "[update] WARN: if BBexchange is private, other users may not fetch release channel."
   fi
   if [[ -z "${channel_url}" ]]; then
     channel_url="${channel_base%/}/${channel_name}"
+  elif [[ "${channel_url}" == *"/wd9337812/BBexchange/"* ]]; then
+    echo "[update] WARN: private application channel URL detected, switching to public installer stable channel."
+    channel_url="${CHANNEL_BASE_DEFAULT%/}/${channel_name}"
   fi
-  if [[ "${channel_url}" =~ \.json$ ]]; then
-    channel_json_url="${channel_url}"
-    channel_url="${channel_url%.json}"
-  else
-    channel_json_url="${channel_url}.json"
-  fi
-
-  if [[ "${channel_url}" == "https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel/"* ]]; then
-    api_url="https://api.github.com/repos/wd9337812/bbexchange-installer/contents/release-channel/${channel_name}?ref=main"
-    echo "[update] resolving channel via GitHub contents API: ${api_url}"
-    api_json="$(curl -fsSL -H 'Cache-Control: no-cache' -H 'Accept: application/vnd.github+json' --max-time 10 "${api_url}" 2>/dev/null || true)"
-    api_b64="$(printf '%s\n' "${api_json}" | sed -n 's/^[[:space:]]*"content":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -d '\r\n ')"
-    if [[ -n "${api_b64}" ]] && command -v base64 >/dev/null 2>&1; then
-      api_resolved="$(printf '%s' "${api_b64}" | base64 -d 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
-      if [[ "${api_resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-        TARGET_TAG="${api_resolved}"
-        echo "[update] resolved image tag from GitHub contents API (${channel_name}): ${TARGET_TAG}"
-        return 0
-      fi
-    fi
-  fi
-
-  sep="?"
-  [[ "${channel_url}" == *\?* ]] && sep="&"
   echo "[update] resolving channel url: ${channel_url}"
-  resolved="$(curl -fsSL -H 'Cache-Control: no-cache' --max-time 10 "${channel_url}${sep}t=${cache_buster}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
+  resolved="$(curl -fsSL --max-time 10 "${channel_url}" 2>/dev/null | tr -d '\r' | head -n 1 || true)"
   if [[ "${resolved}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     TARGET_TAG="${resolved}"
     echo "[update] resolved image tag from channel (${channel_name}): ${TARGET_TAG}"
     return 0
-  fi
-
-  sep="?"
-  [[ "${channel_json_url}" == *\?* ]] && sep="&"
-  echo "[update] resolving channel json url: ${channel_json_url}"
-  raw_json="$(curl -fsSL -H 'Cache-Control: no-cache' --max-time 10 "${channel_json_url}${sep}t=${cache_buster}" 2>/dev/null || true)"
-  if [[ -n "${raw_json}" ]]; then
-    parsed_tag="$(printf '%s' "${raw_json}" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' | head -n 1)"
-    if [[ "${parsed_tag}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-      TARGET_TAG="${parsed_tag}"
-      echo "[update] resolved image tag from channel json (${channel_name}): ${TARGET_TAG}"
-      return 0
-    fi
   fi
   echo "[update] ERROR: failed to resolve channel tag from ${channel_url}"
   return 1
@@ -488,7 +412,9 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! run_preflight_upgrade; then
+if run_preflight_upgrade; then
+  :
+else
   code=$?
   echo "[update] preflight failed with code=${code}"
   exit "${code}"
@@ -499,10 +425,17 @@ CURRENT_TAG="$(sed -n 's/^IMAGE_TAG=//p' "${ENV_FILE}" | head -n 1)"
 ROLLBACK_TAG="${CURRENT_TAG:-}"
 ENV_TAG_WRITTEN=false
 SERVICES_SWITCHED=false
+SERVICES_STOPPED=false
+CURRENT_VERIFIED_FILE="${REPO_DIR}/apps/backend/data/current_verified_image_tag.txt"
+CURRENT_RESOURCE_FILE="${REPO_DIR}/apps/backend/data/current_verified_resource_env.txt"
+PREVIOUS_VERIFIED_FILE="${REPO_DIR}/apps/backend/data/previous_verified_image_tag.txt"
+ATTEMPT_FILE="${REPO_DIR}/apps/backend/data/update_attempt.txt"
+printf '%s\n' "${TARGET_TAG}" > "${ATTEMPT_FILE}.tmp"
+mv "${ATTEMPT_FILE}.tmp" "${ATTEMPT_FILE}"
 RESOURCE_BACKUP="${REPO_DIR}/apps/backend/data/last_good_resource_env.txt"
 if [[ -f scripts/configure_runtime_resources.sh ]]; then
   source scripts/configure_runtime_resources.sh
-  capture_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}"
+  capture_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}.attempt"
 fi
 restore_image_tag_on_error() {
   local code=$?
@@ -512,8 +445,8 @@ restore_image_tag_on_error() {
     echo '[update] Inspect service logs. To roll back, use rollback_image.sh; it first drains captured task results.'
     exit "${code}"
   fi
-  if [[ -f "${RESOURCE_BACKUP}" ]] && declare -F restore_runtime_resource_env >/dev/null; then
-    restore_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}" || true
+  if [[ -f "${RESOURCE_BACKUP}.attempt" ]] && declare -F restore_runtime_resource_env >/dev/null; then
+    restore_runtime_resource_env "${ENV_FILE}" "${RESOURCE_BACKUP}.attempt" || true
   fi
   if [[ "${ENV_TAG_WRITTEN}" == "true" && "${TARGET_TAG}" != "${ROLLBACK_TAG}" ]]; then
     echo "[update] ERROR: update failed before success; restore IMAGE_TAG=${ROLLBACK_TAG:-<empty>}"
@@ -523,18 +456,17 @@ restore_image_tag_on_error() {
       sed -i '/^IMAGE_TAG=/d' "${ENV_FILE}" || true
     fi
   fi
+  if [[ "${SERVICES_STOPPED}" == true ]];then echo "[update] old services were stopped; inspect migration result and rerun this update. No automatic Ads replay was performed.";fi
   exit "${code}"
 }
 trap restore_image_tag_on_error ERR
-if [[ -n "${CURRENT_TAG}" ]]; then
-  echo "${CURRENT_TAG}" > "${LAST_TAG_FILE}"
-fi
+echo "[update] preserve verified rollback records until the new version is ready"
 
 before_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 before_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 
 echo "[update] backup database/files..."
-bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+timeout "${DB_BACKUP_TIMEOUT_SEC:-180}" bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 if [[ -f scripts/configure_runtime_resources.sh ]]; then
   bash scripts/configure_runtime_resources.sh "${ENV_FILE}"
 fi
@@ -569,40 +501,42 @@ if [[ "${TARGET_TAG}" == "latest" && -n "${before_api_id}" && -n "${after_api_id
 fi
 
 echo "[update] migrate schema from image: ${API_IMAGE_REF}"
-SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+# Closing the old producers rolls back their metadata transactions before DDL.
+# Durable task/Ads checkpoints stay in PostgreSQL; no queue or counter is cleared.
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop -t 45 api worker
+SERVICES_STOPPED=true
+timeout "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[update] restart services"
 SERVICES_SWITCHED=true
 IMAGE_TAG="${TARGET_TAG}" docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --force-recreate api worker caddy
 
-echo "[update] health check"
-health_ok=0
-for i in 1 2 3 4 5; do
-  if curl -fsS --max-time 10 http://127.0.0.1/api/health >/dev/null 2>&1; then
-    health_ok=1
-    break
-  fi
-  if curl -fsS --max-time 10 http://127.0.0.1:8080/api/health >/dev/null 2>&1; then
-    health_ok=1
-    break
-  fi
-  sleep 2
-done
-if [[ "${health_ok}" -ne 1 ]]; then
-  echo "[update] ERROR: health check failed after retries."
+echo "[update] waiting for database and Worker readiness"
+if ! bash scripts/wait_runtime_ready.sh;then
+  docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
+  echo '[update] failed before readiness; verified rollback pointers were not replaced.'
   exit 33
 fi
-
+verified_current="$(cat "${CURRENT_VERIFIED_FILE}" 2>/dev/null || true)"
+if [[ -n "${verified_current}" && "${verified_current}" != "${TARGET_TAG}" ]];then
+  printf '%s\n' "${verified_current}" > "${PREVIOUS_VERIFIED_FILE}.tmp"
+  mv "${PREVIOUS_VERIFIED_FILE}.tmp" "${PREVIOUS_VERIFIED_FILE}"
+  printf '%s\n' "${verified_current}" > "${LAST_TAG_FILE}.tmp"
+  mv "${LAST_TAG_FILE}.tmp" "${LAST_TAG_FILE}"
+  if [[ -f "${CURRENT_RESOURCE_FILE}" ]] && grep -qx "# verified_image_tag=${verified_current}" "${CURRENT_RESOURCE_FILE}";then
+    cp -p "${CURRENT_RESOURCE_FILE}" "${RESOURCE_BACKUP}"
+  elif [[ "${verified_current}" == "${CURRENT_TAG}" && -f "${RESOURCE_BACKUP}.attempt" ]];then cp -p "${RESOURCE_BACKUP}.attempt" "${RESOURCE_BACKUP}";fi
+fi
+if declare -F capture_runtime_resource_env >/dev/null;then
+  capture_runtime_resource_env "${ENV_FILE}" "${CURRENT_RESOURCE_FILE}.values"
+  { printf '# verified_image_tag=%s\n' "${TARGET_TAG}";cat "${CURRENT_RESOURCE_FILE}.values"; } > "${CURRENT_RESOURCE_FILE}.tmp"
+  mv "${CURRENT_RESOURCE_FILE}.tmp" "${CURRENT_RESOURCE_FILE}"
+fi
+printf '%s\n' "${TARGET_TAG}" > "${CURRENT_VERIFIED_FILE}.tmp"
+mv "${CURRENT_VERIFIED_FILE}.tmp" "${CURRENT_VERIFIED_FILE}"
 echo "[update] success: IMAGE_TAG=${TARGET_TAG}"
 trap - ERR
 ENV_TAG_WRITTEN=false
-
-if bool_true "${AUTO_CLEANUP}"; then
-  echo "[cleanup] start image retention (keep current + previous rollback)"
-  cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${API_IMAGE_NAME}"
-  cleanup_old_app_images "${ROLLBACK_TAG}" "${IMAGE_REGISTRY}" "${WORKER_IMAGE_NAME}"
-fi
-
 api_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q api 2>/dev/null || true)"
 worker_cid="$(docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps -q worker 2>/dev/null || true)"
 api_started="$(docker inspect -f '{{.State.StartedAt}}' "${api_cid}" 2>/dev/null || true)"
