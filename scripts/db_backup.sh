@@ -73,6 +73,7 @@ if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
     docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres_btcpay >/dev/null
   fi
   READY=false
+  echo "db_backup: waiting for postgres readiness..."
   i=0
   while [ $i -lt 60 ]; do
     if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
@@ -87,6 +88,7 @@ if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
     echo "db_backup: postgres is not ready"
     exit 1
   fi
+  echo "db_backup: checking database connection..."
   ensure_app_identity
   echo "db_backup: postgres dump..."
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \

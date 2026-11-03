@@ -466,7 +466,24 @@ before_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/d
 before_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 
 echo "[update] backup database/files..."
-timeout "${DB_BACKUP_TIMEOUT_SEC:-180}" bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+run_bounded_phase() {
+  local phase="$1" seconds="$2" code
+  shift 2
+  echo "[update] ${phase}: timeout=${seconds}s; terminal input detached"
+  # GNU timeout creates a separate process group. Docker's attached stdin must
+  # not read from the SSH terminal in that background group (SIGTTIN).
+  if timeout --kill-after=30s "${seconds}" "$@" </dev/null; then
+    return 0
+  else
+    code=$?
+    echo "[update] ERROR: ${phase} failed, exit=${code}." >&2
+    if [[ "$code" == 124 || "$code" == 137 ]]; then
+      echo "[update] ${phase} exceeded its time limit; inspect the last printed stage. The update was not marked successful." >&2
+    fi
+    return "$code"
+  fi
+}
+run_bounded_phase backup "${DB_BACKUP_TIMEOUT_SEC:-1800}" bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 if [[ -f scripts/configure_runtime_resources.sh ]]; then
   bash scripts/configure_runtime_resources.sh "${ENV_FILE}"
 fi
@@ -505,7 +522,7 @@ echo "[update] migrate schema from image: ${API_IMAGE_REF}"
 # Durable task/Ads checkpoints stay in PostgreSQL; no queue or counter is cleared.
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop -t 45 api worker
 SERVICES_STOPPED=true
-timeout "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+run_bounded_phase migration "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[update] restart services"
 SERVICES_SWITCHED=true

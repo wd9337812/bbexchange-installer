@@ -561,14 +561,15 @@ run_psql_stdin < "$PLAN_FILE"
 echo "db_migrate: done"
 BBAUTO_EMBED_DB_MIGRATE_SH_20261103
 
-cat > scripts/db_backup.sh <<'EOF'
+cat > scripts/db_backup.sh <<'BBAUTO_TTY_DB_BACKUP_SH_20261103'
 #!/bin/sh
 set -eu
 
-COMPOSE_FILE="${1:-deploy/docker-compose.image.yml}"
+COMPOSE_FILE="${1:-deploy/docker-compose.prod.yml}"
 ENV_FILE="${2:-.env.prod}"
 BACKUP_ROOT="${BACKUP_ROOT:-apps/backend/data/backups}"
 KEEP_COUNT="${BACKUP_KEEP_COUNT:-10}"
+POSTGRES_SERVICE="${POSTGRES_SERVICE:-postgres}"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "env file not found: $ENV_FILE"
@@ -579,15 +580,94 @@ set -a
 . "./$ENV_FILE"
 set +a
 
+SERVICES="$(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --services 2>/dev/null || true)"
+if ! printf '%s\n' "$SERVICES" | grep -qx "$POSTGRES_SERVICE"; then
+  if printf '%s\n' "$SERVICES" | grep -qx "postgres_admin"; then
+    POSTGRES_SERVICE="postgres_admin"
+  fi
+fi
+HAS_BTCPAY_POSTGRES=false
+if printf '%s\n' "$SERVICES" | grep -qx "postgres_btcpay"; then
+  HAS_BTCPAY_POSTGRES=true
+fi
+
 mkdir -p "$BACKUP_ROOT/postgres" "$BACKUP_ROOT/files"
 TS="$(date +%Y%m%d_%H%M%S)"
 
+sql_escape_literal() {
+  printf "%s" "$1" | sed "s/'/''/g"
+}
+
+ensure_app_identity() {
+  APP_USER="${POSTGRES_USER:-bb}"
+  APP_DB="${POSTGRES_DB:-bbexchange}"
+  APP_PASS="${POSTGRES_PASSWORD:-bb_change_me}"
+  APP_USER_ESC="$(sql_escape_literal "$APP_USER")"
+  APP_DB_ESC="$(sql_escape_literal "$APP_DB")"
+  APP_PASS_ESC="$(sql_escape_literal "$APP_PASS")"
+
+  if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${APP_PASS}' psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U '${APP_USER}' -d '${APP_DB}' -c 'select 1;' >/dev/null" >/dev/null 2>&1; then
+    return
+  fi
+
+  echo "db_backup: app db credential mismatch detected, repairing role/db mapping..."
+  SUPERUSER_ROLE="${POSTGRES_SUPERUSER:-${POSTGRES_USER:-bb}}"
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    psql -v ON_ERROR_STOP=1 -U "${SUPERUSER_ROLE}" -d postgres <<EOF >/dev/null
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='${APP_USER_ESC}') THEN
+    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  ELSE
+    EXECUTE format('ALTER ROLE %I WITH LOGIN PASSWORD %L', '${APP_USER_ESC}', '${APP_PASS_ESC}');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='${APP_DB_ESC}') THEN
+    EXECUTE format('CREATE DATABASE %I OWNER %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+  END IF;
+  EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', '${APP_DB_ESC}', '${APP_USER_ESC}');
+END
+\$\$;
+EOF
+}
+
 if [ "${STORAGE_MODE:-postgres}" = "postgres" ]; then
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres >/dev/null
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d "$POSTGRES_SERVICE" >/dev/null
+  if [ "$HAS_BTCPAY_POSTGRES" = "true" ]; then
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d postgres_btcpay >/dev/null
+  fi
+  READY=false
+  echo "db_backup: waiting for postgres readiness..."
+  i=0
+  while [ $i -lt 60 ]; do
+    if docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+      pg_isready -U "${POSTGRES_USER:-bb}" -d "${POSTGRES_DB:-bbexchange}" >/dev/null 2>&1; then
+      READY=true
+      break
+    fi
+    i=$((i+1))
+    sleep 2
+  done
+  if [ "$READY" != "true" ]; then
+    echo "db_backup: postgres is not ready"
+    exit 1
+  fi
+  echo "db_backup: checking database connection..."
+  ensure_app_identity
   echo "db_backup: postgres dump..."
-  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres \
-    sh -lc "pg_dump -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -Fc" \
+  docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T "$POSTGRES_SERVICE" \
+    sh -lc "PGPASSWORD='${POSTGRES_PASSWORD:-bb_change_me}' pg_dump -h 127.0.0.1 -U '${POSTGRES_USER:-bb}' -d '${POSTGRES_DB:-bbexchange}' -Fc" \
     > "$BACKUP_ROOT/postgres/pg_${TS}.dump"
+
+  if [ "$HAS_BTCPAY_POSTGRES" = "true" ] && [ "${BTCPAY_ENABLE:-true}" = "true" ]; then
+    BTCPAY_DB_USER="${BTCPAY_DB_USER:-btcpay}"
+    BTCPAY_DB_PASSWORD="${BTCPAY_DB_PASSWORD:-btcpay_change_me}"
+    BTCPAY_DB_NAME="${BTCPAY_DB_NAME:-btcpayserver}"
+    echo "db_backup: btcpay postgres dump..."
+    docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" exec -T postgres_btcpay \
+      sh -lc "PGPASSWORD='${BTCPAY_DB_PASSWORD}' pg_dump -h 127.0.0.1 -U '${BTCPAY_DB_USER}' -d '${BTCPAY_DB_NAME}' -Fc" \
+      > "$BACKUP_ROOT/postgres/btcpay_${TS}.dump" || true
+  fi
 fi
 
 echo "db_backup: file snapshot..."
@@ -607,9 +687,9 @@ trim_keep "$BACKUP_ROOT/postgres" "pg_*.dump"
 trim_keep "$BACKUP_ROOT/files" "data_*.tar.gz"
 
 echo "db_backup: done"
-EOF
+BBAUTO_TTY_DB_BACKUP_SH_20261103
 
-cat > scripts/update_image.sh <<'BBAUTO_EMBED_UPDATE_IMAGE_SH_20261103'
+cat > scripts/update_image.sh <<'BBAUTO_TTY_UPDATE_IMAGE_SH_20261103'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -1078,7 +1158,24 @@ before_api_id="$(docker image inspect "${API_IMAGE_REF}" --format '{{.Id}}' 2>/d
 before_worker_id="$(docker image inspect "${WORKER_IMAGE_REF}" --format '{{.Id}}' 2>/dev/null || true)"
 
 echo "[update] backup database/files..."
-timeout "${DB_BACKUP_TIMEOUT_SEC:-180}" bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+run_bounded_phase() {
+  local phase="$1" seconds="$2" code
+  shift 2
+  echo "[update] ${phase}: timeout=${seconds}s; terminal input detached"
+  # GNU timeout creates a separate process group. Docker's attached stdin must
+  # not read from the SSH terminal in that background group (SIGTTIN).
+  if timeout --kill-after=30s "${seconds}" "$@" </dev/null; then
+    return 0
+  else
+    code=$?
+    echo "[update] ERROR: ${phase} failed, exit=${code}." >&2
+    if [[ "$code" == 124 || "$code" == 137 ]]; then
+      echo "[update] ${phase} exceeded its time limit; inspect the last printed stage. The update was not marked successful." >&2
+    fi
+    return "$code"
+  fi
+}
+run_bounded_phase backup "${DB_BACKUP_TIMEOUT_SEC:-1800}" bash scripts/db_backup.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 if [[ -f scripts/configure_runtime_resources.sh ]]; then
   bash scripts/configure_runtime_resources.sh "${ENV_FILE}"
 fi
@@ -1117,7 +1214,7 @@ echo "[update] migrate schema from image: ${API_IMAGE_REF}"
 # Durable task/Ads checkpoints stay in PostgreSQL; no queue or counter is cleared.
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop -t 45 api worker
 SERVICES_STOPPED=true
-timeout "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
+run_bounded_phase migration "${DB_MIGRATION_TIMEOUT_SEC:-600}" env SOURCE_IMAGE="${API_IMAGE_REF}" bash scripts/db_migrate.sh "${COMPOSE_FILE}" "${ENV_FILE}"
 
 echo "[update] restart services"
 SERVICES_SWITCHED=true
@@ -1157,7 +1254,8 @@ api_digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${API_IMAGE_RE
 worker_digest="$(docker inspect --format='{{index .RepoDigests 0}}' "${WORKER_IMAGE_REF}" 2>/dev/null || true)"
 echo "[summary] api image id=${after_api_id} started_at=${api_started} digest=${api_digest:-unknown}"
 echo "[summary] worker image id=${after_worker_id} started_at=${worker_started} digest=${worker_digest:-unknown}"
-BBAUTO_EMBED_UPDATE_IMAGE_SH_20261103
+BBAUTO_TTY_UPDATE_IMAGE_SH_20261103
+
 
 cat > scripts/rollback_image.sh <<'BBAUTO_EMBED_ROLLBACK_IMAGE_SH_20261103'
 #!/usr/bin/env bash
@@ -1288,7 +1386,7 @@ echo "[rollback] success: IMAGE_TAG=${TARGET_TAG}"
 trap - ERR
 BBAUTO_EMBED_ROLLBACK_IMAGE_SH_20261103
 
-cat > scripts/wait_runtime_ready.sh <<'BBAUTO_READINESS_20261103'
+cat > scripts/wait_runtime_ready.sh <<'BBAUTO_TTY_WAIT_RUNTIME_READY_SH_20261103'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 deadline=$((SECONDS + ${READINESS_TIMEOUT_SEC:-180}))
@@ -1305,6 +1403,7 @@ while (( SECONDS < deadline )); do
       matched=true;break
     fi
     if [[ "$status" == 503 ]];then last="${response%$'\n'*}";fi
+    if [[ "$status" == 401 || "$status" == 403 ]];then last="就绪接口返回 ${status}，请核对实际镜像版本和入口访问配置；旧版 API 可能尚未完成升级。";fi
   done
   if [[ "$matched" == true ]];then consecutive=$((consecutive+1));else consecutive=0;fi
   if (( consecutive >= 2 ));then echo '[ready] 数据库和 Worker 连续就绪检查通过。';exit 0;fi
@@ -1313,7 +1412,8 @@ done
 echo "[ready] 等待就绪超时：${last}"
 echo '[ready] 请查看 docker compose 容器状态及 api/worker 日志；未自动重发广告或回滚数据。'
 exit 33
-BBAUTO_READINESS_20261103
+BBAUTO_TTY_WAIT_RUNTIME_READY_SH_20261103
+
 chmod +x scripts/wait_runtime_ready.sh scripts/db_migrate.sh scripts/db_backup.sh scripts/update_image.sh scripts/rollback_image.sh
 
 if [[ ! -f ".env.prod" ]]; then
