@@ -65,7 +65,7 @@ Options:
   --domain <domain>            Domain for SSL mode
   --email <email>              Let's Encrypt email
   --enable-browser <true|false> Enable browser execution (default: ${ENABLE_BROWSER})
-  --storage <postgres|file>    Storage mode (default: ${STORAGE_MODE})
+  --storage <postgres|file>    Storage mode (new production installs require postgres)
   --control-plane-url <url>    Control-plane base url (default: built-in)
   --control-plane-key <key>    Control-plane shared key (default: built-in)
   --registry-user <username>   Optional registry username
@@ -98,33 +98,30 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# New installs must never overwrite an existing identity, credentials or deployment.
+if [[ -f "${INSTALL_DIR}/.env.prod" ]];then
+  echo '[install] Existing instance detected. Its tenant identity and configuration were preserved.'
+  echo '[install] Use scripts/update_image.sh in that directory to update or resume startup.'
+  exit 35
+fi
+if [[ "${INSTALL_DIR}" != /* || "${INSTALL_DIR}" == '/' ]];then echo '[install] Choose an absolute application directory.';exit 2;fi
+
 resolve_update_channel_tag() {
-  local channel_base channel_name json_url text_url raw_json parsed raw_text
-  channel_base="${UPDATE_CHANNEL_BASE%/}"
-  channel_name="${UPDATE_CHANNEL_NAME}"
-  json_url="${channel_base}/${channel_name}.json"
-  text_url="${channel_base}/${channel_name}"
-  raw_json="$(curl -fsSL --max-time 10 "${json_url}" 2>/dev/null || true)"
-  if [[ -n "${raw_json}" ]]; then
-    parsed="$(printf '%s' "${raw_json}" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^"]\+\)".*/\1/p' | head -n 1)"
-    if [[ "${parsed}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-      echo "${parsed}"
-      return 0
-    fi
-  fi
-  raw_text="$(curl -fsSL --max-time 10 "${text_url}" 2>/dev/null | sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r//g' | head -n 1 || true)"
-  if [[ "${raw_text}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-    echo "${raw_text}"
-    return 0
-  fi
-  return 1
+  local base="${UPDATE_CHANNEL_BASE%/}" raw_json raw_text parsed
+  raw_json="$(curl -fsSL --max-time 15 "${base}/${UPDATE_CHANNEL_NAME}.json")" || return 1
+  raw_text="$(curl -fsSL --max-time 15 "${base}/${UPDATE_CHANNEL_NAME}")" || return 1
+  [[ "$raw_json" != $'\xef\xbb\xbf'* && "$raw_text" != $'\xef\xbb\xbf'* ]] || return 1
+  raw_text="${raw_text//$'\r'/}"
+  parsed="$(printf '%s' "$raw_json" | sed -n 's/.*"tag"[[:space:]]*:[[:space:]]*"\([^" ]*\)".*/\1/p')"
+  [[ "$parsed" =~ ^sha-[a-f0-9]{10}$ && "$raw_text" == "$parsed" ]] || return 1
+  printf '%s\n' "$parsed"
 }
 
 if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
   UPDATE_CHANNEL_TAG="$(resolve_update_channel_tag || true)"
 fi
 if [[ -z "${UPDATE_CHANNEL_TAG}" ]]; then
-  UPDATE_CHANNEL_TAG="latest"
+  if [[ -n "${IMAGE_TAG}" ]];then UPDATE_CHANNEL_TAG="${IMAGE_TAG}";else echo "[install] Stable pointers unavailable or inconsistent; installation stopped before creating an instance.";exit 36;fi
 fi
 if [[ -z "${IMAGE_TAG}" ]]; then
   IMAGE_TAG="${UPDATE_CHANNEL_TAG}"
@@ -144,8 +141,8 @@ if [[ "${ENABLE_BROWSER}" != "true" && "${ENABLE_BROWSER}" != "false" ]]; then
   echo "Invalid --enable-browser value: ${ENABLE_BROWSER}. Use true|false."
   exit 1
 fi
-if [[ "${STORAGE_MODE}" != "postgres" && "${STORAGE_MODE}" != "file" ]]; then
-  echo "Invalid --storage value: ${STORAGE_MODE}. Use postgres|file."
+if [[ "${STORAGE_MODE}" != "postgres" ]]; then
+  echo "New production installs require --storage postgres for durable tasks, payment events and subscription recovery."
   exit 1
 fi
 
@@ -275,25 +272,25 @@ services:
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
-      - TENANT_CODE=${TENANT_CODE:-local}
+      - TENANT_CODE=${TENANT_CODE}
       - AUTH_SECRET=${AUTH_SECRET}
       - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
       - APP_SERVER_MODE=${APP_SERVER_MODE:-user}
       - MCP_PUBLIC_ORIGIN=${MCP_PUBLIC_ORIGIN:-}
       - MCP_ENABLED=${MCP_ENABLED:-true}
       - MCP_WRITE_ENABLED=${MCP_WRITE_ENABLED:-true}
-      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL}
-      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY}
+      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
+      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
       - CONTROL_PLANE_TIMEOUT_MS=${CONTROL_PLANE_TIMEOUT_MS:-8000}
+      - FRONTEND_BUILD_ID=${FRONTEND_BUILD_ID:-}
+      - OPERATING_REPORTS_ENABLED=${OPERATING_REPORTS_ENABLED:-true}
+      - REPORT_CACHE_TTL_MS=${REPORT_CACHE_TTL_MS:-10000}
       - SELF_UPDATE_ENABLED=${SELF_UPDATE_ENABLED:-false}
       - SELF_UPDATE_MODE=${SELF_UPDATE_MODE:-manual_image_ops}
       - SELF_UPDATE_REPO_DIR=${SELF_UPDATE_REPO_DIR:-/workspace}
       - SELF_UPDATE_HOST_REPO_DIR=${SELF_UPDATE_HOST_REPO_DIR:-/opt/brandbidding}
       - SELF_UPDATE_IMAGE_COMPOSE_FILE=${SELF_UPDATE_IMAGE_COMPOSE_FILE:-deploy/docker-compose.image.yml}
-      - SELF_UPDATE_CHANNEL_BASE=${SELF_UPDATE_CHANNEL_BASE:-https://raw.githubusercontent.com/wd9337812/bbexchange-installer/main/release-channel}
-      - SELF_UPDATE_IMAGE_CHANNEL=${SELF_UPDATE_IMAGE_CHANNEL:-stable}
       - SELF_UPDATE_IMAGE_CHANNEL_TAG=${SELF_UPDATE_IMAGE_CHANNEL_TAG:-latest}
-      - SELF_UPDATE_IMAGE_CHANNEL_URL=${SELF_UPDATE_IMAGE_CHANNEL_URL:-}
       - SELF_UPDATE_HELPER_IMAGE=${SELF_UPDATE_HELPER_IMAGE:-docker:27-cli}
     volumes:
       - ../apps/backend/data:/app/apps/backend/data
@@ -321,7 +318,6 @@ services:
       - STORAGE_MODE=${STORAGE_MODE:-postgres}
       - DATABASE_URL=postgres://${POSTGRES_USER:-bb}:${POSTGRES_PASSWORD:-bb_change_me}@postgres:5432/${POSTGRES_DB:-bbexchange}
       - ENABLE_BROWSER_EXECUTION=${ENABLE_BROWSER_EXECUTION:-false}
-      - TENANT_CODE=${TENANT_CODE:-local}
       - BROWSER_POOL_SIZE=${BROWSER_POOL_SIZE:-}
       - BROWSER_CONCURRENCY_MODE=${BROWSER_CONCURRENCY_MODE:-}
       - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-30}
@@ -333,8 +329,15 @@ services:
       - BROWSER_POOL_MAX_AGE_MS=${BROWSER_POOL_MAX_AGE_MS:-2700000}
       - BROWSER_POOL_CONTEXT_MAX_USES=${BROWSER_POOL_CONTEXT_MAX_USES:-40}
       - GOOGLE_ADS_API_VERSION=${GOOGLE_ADS_API_VERSION:-v25}
+      - OFFER_MONITOR_ENABLED=${OFFER_MONITOR_ENABLED:-true}
+      - OFFER_MONITOR_ACCOUNT_READS_PER_HOUR=${OFFER_MONITOR_ACCOUNT_READS_PER_HOUR:-60}
+      - APP_SERVER_MODE=${APP_SERVER_MODE:-user}
+      - CONTROL_PLANE_BASE_URL=${CONTROL_PLANE_BASE_URL:-}
+      - CONTROL_PLANE_SHARED_KEY=${CONTROL_PLANE_SHARED_KEY:-}
+      - CONTROL_PLANE_TIMEOUT_MS=${CONTROL_PLANE_TIMEOUT_MS:-8000}
       - OFFER_NAV_TIMEOUT_MS=${OFFER_NAV_TIMEOUT_MS:-20000}
-      - CHROMIUM_EXECUTABLE_PATH=${CHROMIUM_EXECUTABLE_PATH:-/usr/bin/chromium-browser}
+      - CHROMIUM_EXECUTABLE_PATH=${CHROMIUM_EXECUTABLE_PATH:-}
+      - TENANT_CODE=${TENANT_CODE}
       - AUTH_SECRET=${AUTH_SECRET}
       - CREDENTIAL_SECRET=${CREDENTIAL_SECRET}
     volumes:
@@ -1649,7 +1652,7 @@ TMP_CID="$(docker create "${API_REF}" sh -lc 'sleep 10')"
 docker cp "${TMP_CID}:/app/apps/backend/sql/." "${INSTALL_DIR}/apps/backend/sql/"
 docker rm -f "${TMP_CID}" >/dev/null
 
-sh scripts/db_migrate.sh deploy/docker-compose.image.yml .env.prod
+env SOURCE_IMAGE="${API_REF}" bash scripts/db_migrate.sh deploy/docker-compose.image.yml .env.prod </dev/null
 
 echo "[7/7] Starting services and health check..."
 docker compose --env-file .env.prod -f deploy/docker-compose.image.yml up -d api worker caddy
@@ -1681,7 +1684,9 @@ rm -f "${PROBE_BODY}" >/dev/null 2>&1 || true
 echo ""
 printf '%s\n' "${IMAGE_TAG}" > apps/backend/data/current_verified_image_tag.txt.tmp
 mv apps/backend/data/current_verified_image_tag.txt.tmp apps/backend/data/current_verified_image_tag.txt
-echo "Install complete."
+echo "Install complete. The tenant identity is preserved in .env.prod."
+echo "Trial dates follow the control-plane rules. Initialize the administrator, then log in; a valid trial needs no payment."
+echo "Online recurring charges require an explicit subscription authorization."
 echo "Status: docker compose --env-file .env.prod -f deploy/docker-compose.image.yml ps"
 if [[ "${SSL_MODE}" == "on" || "${SSL_MODE}" == "auto" ]]; then
   echo "URL: https://${DOMAIN}"
